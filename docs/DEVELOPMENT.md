@@ -182,6 +182,24 @@ failed or cancelled CI runs upload them as a seven-day artifact. A timeout fails
 validation without retrying or skipping tests. The CI build-and-test step also
 has a 30-minute outer limit covering compilation and framework staging.
 
+### iPadOS app
+
+`iPad/` is an [xtool](https://github.com/xtool-org/xtool) SwiftPM project, so it
+builds on macOS, Linux or WSL once `xtool setup` has installed the Darwin SDK:
+
+```sh
+cd iPad
+xtool dev build -c release --ipa   # writes xtool/SakuraCordPad.ipa
+xtool dev                          # build, sign and run on a connected iPad
+```
+
+It requires iPadOS 27 and shares SakuraCordModels, DiscordProtocol and
+MessageRendering with the Mac app. `iPad/Sources/SakuraCordPad/Shared/`
+symlinks the Mac app's sign-in services rather than copying them, so check out
+with symlinks enabled. Voice, uploads, plugins and updates remain macOS-only.
+`iPad/Resources/AppIcon.png` is the brand icon re-rendered full-bleed for the
+iPadOS icon mask.
+
 ### Profiling command pickers
 
 In Instruments, use Time Profiler with the app's `PointsOfInterest` signposts.

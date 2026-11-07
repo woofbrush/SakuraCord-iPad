@@ -1,4 +1,6 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
 import SakuraCordModels
 import SwiftUI
@@ -145,6 +147,7 @@ public enum DiscordMarkdown {
         Delimiter(marker: "_", traits: .italic),
     ]
 
+#if canImport(AppKit)
     private static let appKitCache = AppKitMarkdownRenderCache()
     private static let codeForegroundColor = NSColor(
         srgbRed: 219 / 255,
@@ -152,6 +155,7 @@ public enum DiscordMarkdown {
         blue: 225 / 255,
         alpha: 1
     )
+#endif
 
     public static func attributed(_ source: String) -> AttributedString {
         let plan = appKitPlan(source)
@@ -203,6 +207,7 @@ public enum DiscordMarkdown {
         return output
     }
 
+#if canImport(AppKit)
     public static func appKitAttributed(
         _ source: String,
         baseFontSize: CGFloat = 15
@@ -217,6 +222,7 @@ public enum DiscordMarkdown {
         appKitCache.insert(result, for: source, baseFontSize: baseFontSize)
         return result
     }
+#endif
 
     public static func appKitPlan(_ source: String) -> AppKitPlan {
         let rawLines = source.split(
@@ -304,6 +310,7 @@ public enum DiscordMarkdown {
         return AppKitPlan(lines: qualifyingSpoilerIDs(lines))
     }
 
+#if canImport(AppKit)
     public static func appKitAttributed(
         _ plan: AppKitPlan,
         baseFontSize: CGFloat = 15
@@ -433,6 +440,7 @@ public enum DiscordMarkdown {
         }
         return attributes
     }
+#endif
 
     private static func planLine(_ source: String) -> AppKitPlan.Line {
         if source.hasPrefix("### ") {
@@ -1135,6 +1143,7 @@ public enum DiscordMarkdown {
             : .jsonString
     }
 
+#if canImport(AppKit)
     private static func appKitFont(
         block: AppKitPlan.Block,
         traits: AppKitPlan.InlineTraits,
@@ -1223,6 +1232,7 @@ public enum DiscordMarkdown {
             }
         }
     }
+#endif
 
     private static func isCodeBlock(
         _ line: AppKitPlan.Line
@@ -1270,6 +1280,7 @@ public enum DiscordMarkdown {
         }
     }
 
+#if canImport(AppKit)
     private static func paragraphStyle(
         for block: AppKitPlan.Block,
         startsListBlock: Bool,
@@ -1328,6 +1339,7 @@ public enum DiscordMarkdown {
         default: nil
         }
     }
+#endif
 }
 
 private extension DiscordMarkdown {
@@ -1382,6 +1394,7 @@ private extension DiscordMarkdown {
     }
 }
 
+#if canImport(AppKit)
 private final class AppKitMarkdownRenderCache: @unchecked Sendable {
     private let values = NSCache<AppKitMarkdownCacheKey, NSAttributedString>()
 
@@ -1438,6 +1451,7 @@ private final class AppKitMarkdownCacheKey: NSObject {
         return source == other.source && baseFontSize == other.baseFontSize
     }
 }
+#endif
 
 public extension DiscordMarkdown {
     /// Visible emoji-bearing text for send-time usage tracking. Code and link

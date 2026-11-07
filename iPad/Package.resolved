@@ -1,0 +1,23 @@
+{
+  "originHash" : "cde7b7bbc711b81740f4593815c13472586349cb2175ce9a06e3360bf4149c42",
+  "pins" : [
+    {
+      "identity" : "hcaptcha",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/llsc12/hcaptcha",
+      "state" : {
+        "revision" : "29de12bd290c5cc9c61b3e3c15fe9a9d21449465"
+      }
+    },
+    {
+      "identity" : "zstd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/facebook/zstd.git",
+      "state" : {
+        "revision" : "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+        "version" : "1.5.7"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "DiscordProtocol",
-    platforms: [.macOS(.v27)],
+    platforms: [.macOS(.v27), .iOS(.v27)],
     products: [.library(name: "DiscordProtocol", targets: ["DiscordProtocol"])],
     dependencies: [
         .package(path: "../SakuraCordModels"),

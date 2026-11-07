@@ -10,6 +10,7 @@ For commands, use [Development](DEVELOPMENT.md). For wire behaviour, use the
 | Package | Owns |
 | --- | --- |
 | [App](../App/Package.swift) | SwiftUI scenes, AppKit presentation, account/workspace coordination, settings, authentication UI, plugin-host executable. |
+| [iPad](../iPad/Package.swift) | iPadOS app: account session, per-window navigation, window-control layout, hardware-keyboard and pointer input. Reuses App's sign-in services through symlinks. |
 | [SakuraCordModels](../Packages/SakuraCordModels/Package.swift) | Domain values, typed IDs, messages, commands, interactions, provider events. |
 | [DiscordProtocol](../Packages/DiscordProtocol/Package.swift) | Provider boundary, REST/Gateway, DTOs, scheduling, credentials, offline fixtures. |
 | [SakuraCordPersistence](../Packages/SakuraCordPersistence/Package.swift) | Account-scoped GRDB storage and migrations for user-authored drafts and created invite links. |

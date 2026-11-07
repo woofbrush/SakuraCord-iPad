@@ -23,5 +23,6 @@ sparkle-private-key
 *.mobileprovision
 Package.resolved
 !App/Package.resolved
+!iPad/Package.resolved
 __pycache__/
 *.pyc
