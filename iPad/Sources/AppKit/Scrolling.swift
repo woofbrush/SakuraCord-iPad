@@ -87,6 +87,9 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
 }
 
 public extension UIScrollView {
+    /// NSScrollView.contentSize is the viewport; UIScrollView's is the document.
+    var nsContentSize: CGSize { bounds.size }
+
     var documentVisibleRect: CGRect { bounds }
 
     func scroll(to point: CGPoint) { contentOffset = point }

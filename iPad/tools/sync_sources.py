@@ -20,6 +20,7 @@ FOLDERS = ["App", "Models", "Services", "Support", "Views"]
 NON_OPTIONAL = r"layer|textStorage|layoutManager|textContainer"
 REMOVED_IMPORTS = re.compile(r"^(@preconcurrency )?import (Sparkle|ServiceManagement)\n", re.M)
 RULES = [
+    (re.compile(r"\b(\w*[sS]crollView[?]?)[.]contentSize\b"), lambda m: f"{m.group(1)}.nsContentSize"),
     (re.compile(r"\bCTLineCreateWithAttributedString\("), "AKCTLineCreate("),
     (re.compile(r"\bCTFramesetterCreateWithAttributedString\("), "AKCTFramesetterCreate("),
     (re.compile(r"\bCTTypesetterCreateWithAttributedString\("), "AKCTTypesetterCreate("),
@@ -97,6 +98,17 @@ RULES = [
 
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
+    "NativeMemberListViewBridge.swift": [
+        (re.compile(r"width: max\(0, contentSize[.]width\)"), "width: max(0, nsContentSize.width)"),
+    ],
+    "StableAnchoredPopover.swift": [
+        (re.compile(r"popover[.]contentViewController[?][.]view[.]window[?][.]ignoresMouseEvents =\s*configuration[.]ignoresMouseEvents"),
+         "popover.contentViewController?.view.isUserInteractionEnabled = !configuration.ignoresMouseEvents"),
+    ],
+    "PopoverEscapeKeyCoordinator.swift": [
+        (re.compile(r"^( +)(content\((?:value)?\))\n( +)[.]background [{]", re.M),
+         lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(3)}.fixedSize()\n{m.group(3)}.presentationCompactAdaptation(.popover)\n{m.group(3)}.background {{"),
+    ],
     "NativeMemberListCanvasView.swift": [
         (re.compile(r"override func draw\(_ dirtyRect: NSRect\) [{]"), "func drawCanvas(_ dirtyRect: NSRect) {"),
         (re.compile(r"(    override func updateTrackingAreas\(\) [{])"), lambda m: """    private lazy var viewportBacking: NSViewportBackingView = {
@@ -197,6 +209,7 @@ FILE_RULES = {
         (re.compile(r"(focusRequestIsScheduled = true\s*)Task [{] @MainActor \[weak self\] in"), lambda m: f"{m.group(1)}Task<Void, Never> {{ @MainActor [weak self] in"),
     ],
     "GIFPickerNativeGrid.swift": [
+        (re.compile(r"max\(contentSize[.](width|height), layoutSize"), lambda m: f"max(nsContentSize.{m.group(1)}, layoutSize"),
         (re.compile(r"((?:[lL]ayer|Canvas[.]layer)[?]?[.]contents = )(?!nil)([^\n]+)"), lambda m: f"{m.group(1)}nsLayerContents({m.group(2)})"),
     ],
     "AnimatedRemoteImage.swift": [

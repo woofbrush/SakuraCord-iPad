@@ -304,7 +304,7 @@ public extension UIWindow {
 
     var ak_topViewController: UIViewController? {
         var controller = rootViewController
-        while let presented = controller?.presentedViewController {
+        while let presented = controller?.presentedViewController, !presented.isBeingDismissed {
             controller = presented
         }
         return controller
@@ -315,15 +315,6 @@ public extension UIWindow {
 
 public nonisolated enum NSRectEdge: Sendable {
     case minX, minY, maxX, maxY
-
-    var arrows: UIPopoverArrowDirection {
-        switch self {
-        case .minX: .right
-        case .maxX: .left
-        case .minY: .down
-        case .maxY: .up
-        }
-    }
 }
 
 public extension CGRectEdge {
@@ -338,7 +329,33 @@ public extension CGRectEdge {
     @objc optional func popoverShouldClose(_ popover: NSPopover) -> Bool
 }
 
-public final class NSPopover: NSObject, UIPopoverPresentationControllerDelegate {
+/// Glass surface for a popover. Touches on its chrome pass through, so a popover
+/// whose content ignores input (a hover card) never blocks the view beneath it.
+private final class PopoverContainerView: UIView {
+    let effect = UIVisualEffectView(effect: UIGlassEffect())
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        effect.frame = bounds
+        effect.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        effect.layer.cornerRadius = 18
+        effect.layer.cornerCurve = .continuous
+        effect.clipsToBounds = true
+        addSubview(effect)
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self || hit === effect || hit === effect.contentView ? nil : hit
+    }
+}
+
+/// AppKit popovers are separate non-modal windows: hover cards do not take input,
+/// several can be open, and showing one again only moves it. UIKit's modal popover
+/// presentation allows none of that, so this is an overlay anchored to its view.
+public final class NSPopover: NSObject {
     public enum Behavior: Sendable { case applicationDefined, transient, semitransient }
 
     public static let willShowNotification = Notification.Name("NSPopoverWillShowNotification")
@@ -346,19 +363,35 @@ public final class NSPopover: NSObject, UIPopoverPresentationControllerDelegate 
     public static let willCloseNotification = Notification.Name("NSPopoverWillCloseNotification")
     public static let didCloseNotification = Notification.Name("NSPopoverDidCloseNotification")
 
+    private static var open: [NSPopover] = []
+
     public var contentViewController: UIViewController?
     public var behavior: Behavior = .applicationDefined
     public var animates = true
     public var hasFullSizeContent = false
     public weak var delegate: NSPopoverDelegate?
     public var appearance: NSAppearance?
-    public var positioningRect: CGRect = .zero
     public private(set) var isShown = false
+
+    public var positioningRect: CGRect = .zero {
+        didSet { if isShown, oldValue != positioningRect { reposition() } }
+    }
 
     public var contentSize: CGSize {
         get { contentViewController?.preferredContentSize ?? .zero }
-        set { contentViewController?.preferredContentSize = newValue }
+        set {
+            contentViewController?.preferredContentSize = newValue
+            if isShown { reposition() }
+        }
     }
+
+    private var container: PopoverContainerView?
+    private var closingContainer: PopoverContainerView?
+    private weak var hostController: UIViewController?
+    private weak var anchorView: UIView?
+    private var edge: NSRectEdge = .maxY
+    private var sizeObservation: NSKeyValueObservation?
+    private var outsideClickMonitor: Any?
 
     private func notify(_ name: Notification.Name, _ call: (Notification) -> Void) {
         let note = Notification(name: name, object: self)
@@ -367,43 +400,148 @@ public final class NSPopover: NSObject, UIPopoverPresentationControllerDelegate 
     }
 
     public func show(relativeTo rect: CGRect, of view: UIView, preferredEdge: NSRectEdge) {
-        guard let controller = contentViewController, let presenter = view.window?.ak_topViewController else { return }
-        controller.modalPresentationStyle = .popover
-        guard let popover = controller.popoverPresentationController else { return }
-        popover.sourceView = view
-        popover.sourceRect = rect
-        popover.permittedArrowDirections = preferredEdge.arrows
-        popover.delegate = self
+        guard let controller = contentViewController, let window = view.window else { return }
+        anchorView = view
+        edge = preferredEdge
+        positioningRect = rect
+        if isShown {
+            reposition()
+            return
+        }
+        finishClosing()
+        guard let host = window.ak_topViewController else { return }
         isShown = true
+        hostController = host
         notify(Self.willShowNotification) { delegate?.popoverWillShow?($0) }
-        presenter.present(controller, animated: animates) { [self] in
+
+        let container = PopoverContainerView()
+        host.addChild(controller)
+        controller.view.backgroundColor = .clear
+        controller.view.translatesAutoresizingMaskIntoConstraints = true
+        controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.effect.contentView.addSubview(controller.view)
+        host.view.addSubview(container)
+        controller.didMove(toParent: host)
+        self.container = container
+        Self.open.append(self)
+        reposition()
+        controller.view.frame = container.bounds
+
+        sizeObservation = controller.observe(\.preferredContentSize, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.reposition() }
+        }
+        if behavior != .applicationDefined {
+            outsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                self?.handleClick(event)
+                return event
+            }
+        }
+
+        guard animates else {
+            notify(Self.didShowNotification) { delegate?.popoverDidShow?($0) }
+            return
+        }
+        container.alpha = 0
+        container.transform = CGAffineTransform(scaleX: 0.96, y: 0.96)
+        UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+            container.alpha = 1
+            container.transform = .identity
+        } completion: { [self] _ in
             notify(Self.didShowNotification) { delegate?.popoverDidShow?($0) }
         }
+    }
+
+    private var resolvedSize: CGSize {
+        guard let controller = contentViewController else { return .zero }
+        let preferred = controller.preferredContentSize
+        if preferred.width >= 2, preferred.height >= 2 { return preferred }
+        return controller.view.sizeThatFits(CGSize(width: 480, height: 640))
+    }
+
+    private func reposition() {
+        guard let container, let hostView = hostController?.view, let anchorView, anchorView.window != nil else { return }
+        let area = hostView.bounds.inset(by: hostView.safeAreaInsets).insetBy(dx: 8, dy: 8)
+        let size = CGSize(width: min(resolvedSize.width, area.width), height: min(resolvedSize.height, area.height))
+        let anchor = anchorView.convert(positioningRect, to: hostView)
+        let gap: CGFloat = 6
+
+        func origin(_ edge: NSRectEdge) -> CGPoint {
+            switch edge {
+            case .minY: CGPoint(x: anchor.midX - size.width / 2, y: anchor.minY - gap - size.height)
+            case .maxY: CGPoint(x: anchor.midX - size.width / 2, y: anchor.maxY + gap)
+            case .minX: CGPoint(x: anchor.minX - gap - size.width, y: anchor.midY - size.height / 2)
+            case .maxX: CGPoint(x: anchor.maxX + gap, y: anchor.midY - size.height / 2)
+            }
+        }
+
+        func fits(_ edge: NSRectEdge) -> Bool {
+            switch edge {
+            case .minY: anchor.minY - gap - size.height >= area.minY
+            case .maxY: anchor.maxY + gap + size.height <= area.maxY
+            case .minX: anchor.minX - gap - size.width >= area.minX
+            case .maxX: anchor.maxX + gap + size.width <= area.maxX
+            }
+        }
+
+        let opposite: NSRectEdge = switch edge {
+        case .minY: .maxY
+        case .maxY: .minY
+        case .minX: .maxX
+        case .maxX: .minX
+        }
+        var point = origin(fits(edge) || !fits(opposite) ? edge : opposite)
+        point.x = min(max(point.x, area.minX), max(area.minX, area.maxX - size.width))
+        point.y = min(max(point.y, area.minY), max(area.minY, area.maxY - size.height))
+
+        let transform = container.transform
+        container.transform = .identity
+        container.frame = CGRect(origin: point, size: size)
+        container.transform = transform
+    }
+
+    private func handleClick(_ event: NSEvent) {
+        guard isShown else { return }
+        // A popover opened from this one is its child: clicking it is not "outside".
+        let index = Self.open.firstIndex { $0 === self } ?? 0
+        for popover in Self.open[index...] {
+            guard let surface = popover.container else { continue }
+            if surface.bounds.contains(surface.convert(event.locationInWindow, from: nil)) { return }
+        }
+        DispatchQueue.main.async { [weak self] in self?.performClose(nil) }
     }
 
     public func close() {
         guard isShown else { return }
         notify(Self.willCloseNotification) { delegate?.popoverWillClose?($0) }
-        contentViewController?.dismiss(animated: animates) { [self] in finishClose() }
+        isShown = false
+        sizeObservation = nil
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        outsideClickMonitor = nil
+        Self.open.removeAll { $0 === self }
+        closingContainer = container
+        container = nil
+        guard animates, let closing = closingContainer else { return finishClosing() }
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseIn, .allowUserInteraction]) {
+            closing.alpha = 0
+        } completion: { [weak self] _ in
+            self?.finishClosing()
+        }
     }
 
-    public func performClose(_: Any?) { close() }
+    public func performClose(_: Any?) {
+        guard delegate?.popoverShouldClose?(self) != false else { return }
+        close()
+    }
 
-    private func finishClose() {
-        isShown = false
+    private func finishClosing() {
+        guard let closing = closingContainer else { return }
+        closingContainer = nil
+        contentViewController?.willMove(toParent: nil)
+        contentViewController?.view.removeFromSuperview()
+        contentViewController?.removeFromParent()
+        closing.removeFromSuperview()
         notify(Self.didCloseNotification) { delegate?.popoverDidClose?($0) }
     }
-
-    public func adaptivePresentationStyle(
-        for _: UIPresentationController,
-        traitCollection _: UITraitCollection
-    ) -> UIModalPresentationStyle { .none }
-
-    public func presentationControllerShouldDismiss(_: UIPresentationController) -> Bool {
-        behavior != .applicationDefined && delegate?.popoverShouldClose?(self) != false
-    }
-
-    public func presentationControllerDidDismiss(_: UIPresentationController) { finishClose() }
 }
 
 // MARK: File panels

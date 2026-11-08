@@ -167,6 +167,9 @@ extension UIView {
         set { objc_setAssociatedObject(self, &ViewBridge.postsChangesKey, newValue ? true : nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
     }
     public var fittingSize: CGSize {
+        if String(describing: type(of: self)).contains("HostingView") {
+            return sizeThatFits(CGSize(width: bounds.width > 0 ? bounds.width : CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+        }
         guard bounds.width > 0 else { return systemLayoutSizeFitting(UIView.layoutFittingCompressedSize) }
         return systemLayoutSizeFitting(
             CGSize(width: bounds.width, height: 0),

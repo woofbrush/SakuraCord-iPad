@@ -218,34 +218,48 @@ public nonisolated final class NSGraphicsContext: NSObject {
         isFlipped = flipped
     }
 
-    nonisolated(unsafe) private static var pushed: [NSGraphicsContext] = []
-    nonisolated(unsafe) private static var marks: [Int] = []
+    private final class Stack {
+        var pushed: [NSGraphicsContext] = []
+        var marks: [Int] = []
+    }
+
+    /// UIKit's context stack is per thread, so this must be too.
+    private static var stack: Stack {
+        let storage = Thread.current.threadDictionary
+        if let stack = storage["ak.graphics"] as? Stack { return stack }
+        let stack = Stack()
+        storage["ak.graphics"] = stack
+        return stack
+    }
 
     public static var current: NSGraphicsContext? {
         get {
-            if let pushed = pushed.last { return pushed }
-            return UIGraphicsGetCurrentContext().map { NSGraphicsContext(cgContext: $0) }
+            guard let context = UIGraphicsGetCurrentContext() else { return nil }
+            if let top = stack.pushed.last, top.cgContext === context { return top }
+            return NSGraphicsContext(cgContext: context)
         }
         set {
+            let stack = stack
             if let newValue {
-                pushed.append(newValue)
+                stack.pushed.append(newValue)
                 UIGraphicsPushContext(newValue.cgContext)
-            } else if !pushed.isEmpty {
-                pushed.removeLast()
+            } else if !stack.pushed.isEmpty {
+                stack.pushed.removeLast()
                 UIGraphicsPopContext()
             }
         }
     }
 
     public static func saveGraphicsState() {
-        marks.append(pushed.count)
+        stack.marks.append(stack.pushed.count)
         UIGraphicsGetCurrentContext()?.saveGState()
     }
 
     public static func restoreGraphicsState() {
-        let mark = marks.popLast() ?? pushed.count
-        while pushed.count > mark {
-            pushed.removeLast()
+        let stack = stack
+        let mark = stack.marks.popLast() ?? stack.pushed.count
+        while stack.pushed.count > mark {
+            stack.pushed.removeLast()
             UIGraphicsPopContext()
         }
         UIGraphicsGetCurrentContext()?.restoreGState()

@@ -116,9 +116,10 @@ public extension UIWindow {
     func endSheet(_: UIWindow, returnCode _: NSApplication.ModalResponse = .cancel) {}
 
     var toolbar: AnyObject? { nil }
+    /// macOS popovers have their own window; here that would be the entire app.
     var ignoresMouseEvents: Bool {
-        get { !isUserInteractionEnabled }
-        set { isUserInteractionEnabled = !newValue }
+        get { false }
+        set {}
     }
 
     static let didResizeNotification = Notification.Name("NSWindowDidResizeNotification")
