@@ -3,13 +3,17 @@ import SakuraCordModels
 
 struct GatewayMergedPresencesDTO: Decodable {
     var friends: [PresenceUpdateDTO]
+    /// One list per guild, in READY's guild order.
+    var guilds: [[PresenceUpdateDTO]]
 
     enum CodingKeys: String, CodingKey {
         case friends
+        case guilds
     }
 
-    init(friends: [PresenceUpdateDTO] = []) {
+    init(friends: [PresenceUpdateDTO] = [], guilds: [[PresenceUpdateDTO]] = []) {
         self.friends = friends
+        self.guilds = guilds
     }
 
     init(from decoder: any Decoder) throws {
@@ -19,6 +23,11 @@ struct GatewayMergedPresencesDTO: Decodable {
                 LossyList<PresenceUpdateDTO>.self,
                 forKey: .friends
             ))?.elements ?? []
+        guilds =
+            (try? container.decode(
+                LossyList<LossyList<PresenceUpdateDTO>>.self,
+                forKey: .guilds
+            ))?.elements.map(\.elements) ?? []
     }
 }
 

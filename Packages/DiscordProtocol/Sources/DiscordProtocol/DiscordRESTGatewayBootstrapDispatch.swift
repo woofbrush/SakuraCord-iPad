@@ -612,8 +612,15 @@ extension DiscordRESTProvider {
         }
         rehydratePrivateChannelRecipients()
         admitCachedPrivateRecipientUsersToMessageSearch()
+        // After the lazy channels above, whose recipients these may describe.
+        let sharedServerPresenceChanged = supplemental.mergedPresences.guilds.joined()
+            .reduce(false) { cacheSharedServerPresence($1) || $0 }
+        for presence in supplemental.mergedPresences.friends {
+            cachePrivatePresence(presence)
+        }
         if !supplemental.lazyPrivateChannels.isEmpty
             || !supplemental.privatePresences.isEmpty
+            || sharedServerPresenceChanged
         {
             continuation?.yield(.privateMembersChanged(privateMembersInChannelOrder()))
         }

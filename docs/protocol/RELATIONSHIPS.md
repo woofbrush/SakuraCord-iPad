@@ -21,7 +21,9 @@ Types are 0 none, 1 friend, 2 blocked, 3 incoming, 4 outgoing and 5 implicit.
 Type 0 must be retained when `user_ignored` is true. READY
 lists every record, sometimes without an embedded user; a record keeps its
 identity until the user hydrates. READY_SUPPLEMENTAL `merged_presences.friends`
-and private `PRESENCE_UPDATE` feed the shared private presence cache; absent
+and private `PRESENCE_UPDATE` feed the shared private presence cache. A
+conversation's non-friend recipient has only `merged_presences.guilds` and guild
+`PRESENCE_UPDATE` from a shared server; those feed it for recipients only. Absent
 presence and another user's Invisible both read as offline. There is no
 per-friend presence request.
 

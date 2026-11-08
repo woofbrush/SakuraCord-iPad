@@ -193,6 +193,21 @@ extension DiscordRESTProvider {
         })
     }
 
+    /// Discord sends only friends' presence privately, so a shared server is
+    /// the one source for anyone else this account has a conversation with.
+    /// Returns whether it changed what the conversation shows.
+    @discardableResult
+    func cacheSharedServerPresence(_ update: PresenceUpdateDTO) -> Bool {
+        guard let userID = UserID(update.user.id),
+              cachedChannels[nil]?.contains(where: { $0.recipients.contains { $0.id == userID } }) == true
+        else { return false }
+        let previous = cachedPrivateMembersByID[userID]
+        var privateUpdate = update
+        privateUpdate.guildID = nil
+        cachePrivatePresence(privateUpdate)
+        return cachedPrivateMembersByID[userID] != previous
+    }
+
     func cachePrivatePresence(_ update: PresenceUpdateDTO) {
         guard update.guildID == nil,
               let userID = UserID(update.user.id),

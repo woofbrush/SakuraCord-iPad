@@ -294,6 +294,9 @@ extension DiscordRESTProvider {
             }
             return
         }
+        if cacheSharedServerPresence(update) {
+            continuation?.yield(.privateMembersChanged(privateMembersInChannelOrder()))
+        }
         guard let guildID = update.guildID.flatMap(GuildID.init),
               let userID = UserID(update.user.id),
               let status = PresenceStatus(rawValue: update.status),

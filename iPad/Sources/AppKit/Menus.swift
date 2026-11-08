@@ -168,15 +168,31 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
     private static var active: MenuPresenter?
     private let menu: NSMenu
     private weak var view: UIView?
+    private let location: CGPoint
     private var interaction: UIContextMenuInteraction?
 
-    private init(menu: NSMenu, view: UIView) {
+    /// Left to itself, UIKit lifts the whole view the interaction is on.
+    private lazy var targetedPreview: UITargetedPreview? = {
+        guard let view else { return nil }
+        let preview = view.contextMenuPreview(at: location)
+            ?? UIView(frame: CGRect(origin: location, size: CGSize(width: 1, height: 1)))
+        let parameters = UIPreviewParameters()
+        parameters.backgroundColor = .clear
+        return UITargetedPreview(
+            view: preview,
+            parameters: parameters,
+            target: UIPreviewTarget(container: view, center: CGPoint(x: preview.frame.midX, y: preview.frame.midY))
+        )
+    }()
+
+    private init(menu: NSMenu, view: UIView, location: CGPoint) {
         self.menu = menu
         self.view = view
+        self.location = location
     }
 
     static func present(_ menu: NSMenu, at location: CGPoint, in view: UIView) {
-        let presenter = MenuPresenter(menu: menu, view: view)
+        let presenter = MenuPresenter(menu: menu, view: view, location: location)
         active = presenter
         menu.delegate?.menuWillOpen?(menu)
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
@@ -212,6 +228,22 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
             UIMenu(children: elements)
         }
+    }
+
+    func contextMenuInteraction(
+        _: UIContextMenuInteraction,
+        configuration _: UIContextMenuConfiguration,
+        highlightPreviewForItemWithIdentifier _: any NSCopying
+    ) -> UITargetedPreview? {
+        targetedPreview
+    }
+
+    func contextMenuInteraction(
+        _: UIContextMenuInteraction,
+        configuration _: UIContextMenuConfiguration,
+        dismissalPreviewForItemWithIdentifier _: any NSCopying
+    ) -> UITargetedPreview? {
+        targetedPreview
     }
 
     func contextMenuInteraction(

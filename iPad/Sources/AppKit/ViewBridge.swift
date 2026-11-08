@@ -30,6 +30,9 @@ extension UIView {
 
     @objc(ak_menuForEvent:) open func menu(for event: NSEvent) -> NSMenu? { nil }
 
+    /// What a context menu at `point` lifts, framed in this view. Nil lifts nothing, as on macOS.
+    @objc(ak_contextMenuPreviewAt:) open func contextMenuPreview(at point: CGPoint) -> UIView? { nil }
+
     public var alphaValue: CGFloat {
         get { alpha }
         set { alpha = newValue }

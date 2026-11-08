@@ -110,6 +110,21 @@ RULES = [
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
     "NativeTimelineCanvasInteractions.swift": [
+        (re.compile(r"(    override func menu\(for event: NSEvent\) -> NSMenu[?] [{])"), lambda m: """    override func contextMenuPreview(at point: CGPoint) -> UIView? {
+        guard let index = rowIndex(at: point.y), layouts.indices.contains(index),
+              case .message = items[index]
+        else { return nil }
+        let item = items[index]
+        let frame = rowFrame(at: index)
+        let preview = UIImageView(image: bitmap(
+            for: item, at: index, layout: layouts[index], width: frame.width,
+            preparedMediaKeys: mediaKeys(for: item, at: index)
+        ))
+        preview.frame = frame
+        return preview
+    }
+
+""" + m.group(1)),
         (re.compile(r"guard let hit,\n(\s+)let reaction = hit[.]reaction,"), lambda m: f"guard isFrontmostAtPointer,\n{m.group(1)}let hit,\n{m.group(1)}let reaction = hit.reaction,"),
     ],
     # arrowEdge means the anchor's edge on macOS but the popover's edge on iOS, where
