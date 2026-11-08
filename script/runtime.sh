@@ -15,23 +15,51 @@ SAKURACORD_RUNTIME_LOADED=1
 
 SAKURACORD_ROOT_DIR="${SAKURACORD_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 SAKURACORD_PRODUCT_NAME="SakuraCord"
-SAKURACORD_APP_NAME="$SAKURACORD_PRODUCT_NAME"
-SAKURACORD_DISPLAY_NAME="$SAKURACORD_PRODUCT_NAME"
 SAKURACORD_BUNDLE_ID="dev.sakuracord.SakuraCord"
 SAKURACORD_PACKAGE_DIR="$SAKURACORD_ROOT_DIR/App"
 SAKURACORD_SCRATCH_DIR="$SAKURACORD_PACKAGE_DIR/.build"
 SAKURACORD_DIST_DIR="$SAKURACORD_ROOT_DIR/dist"
-SAKURACORD_APP_BUNDLE="$SAKURACORD_DIST_DIR/$SAKURACORD_APP_NAME.app"
-SAKURACORD_EXECUTABLE_PATH="$SAKURACORD_APP_BUNDLE/Contents/MacOS/$SAKURACORD_APP_NAME"
+
+# Selects the app name, bundle path, and icon for a build configuration
+# (debug|release) and release track (regular|nightly). Debug builds are
+# "SakuraCord Debug", nightly release builds are "SakuraCord Nightly", and
+# regular release builds keep the product name.
+sakuracord_select_app_variant() {
+  local configuration="$1"
+  local track="${2:-regular}"
+  if [[ "$configuration" == "debug" ]]; then
+    SAKURACORD_APP_VARIANT=debug
+    SAKURACORD_APP_NAME="$SAKURACORD_PRODUCT_NAME Debug"
+    SAKURACORD_APP_ICON_SOURCE="$SAKURACORD_PRODUCT_NAME Debug.icon"
+  elif [[ "$track" == "nightly" ]]; then
+    SAKURACORD_APP_VARIANT=nightly
+    SAKURACORD_APP_NAME="$SAKURACORD_PRODUCT_NAME Nightly"
+    SAKURACORD_APP_ICON_SOURCE="$SAKURACORD_PRODUCT_NAME Nightly.icon"
+  else
+    SAKURACORD_APP_VARIANT=release
+    SAKURACORD_APP_NAME="$SAKURACORD_PRODUCT_NAME"
+    SAKURACORD_APP_ICON_SOURCE="$SAKURACORD_PRODUCT_NAME.icon"
+  fi
+  SAKURACORD_DISPLAY_NAME="$SAKURACORD_APP_NAME"
+  SAKURACORD_APP_BUNDLE="$SAKURACORD_DIST_DIR/$SAKURACORD_APP_NAME.app"
+  SAKURACORD_EXECUTABLE_PATH="$SAKURACORD_APP_BUNDLE/Contents/MacOS/$SAKURACORD_APP_NAME"
+}
+# Development launches, Computer Use, and profiling target the debug build.
+sakuracord_select_app_variant debug
+
 SAKURACORD_RUNTIME_DIR="$SAKURACORD_ROOT_DIR/.codex-runtime"
 SAKURACORD_OPERATION_LOCK="$SAKURACORD_RUNTIME_DIR/operation.lock"
 SAKURACORD_SWIFTPM_CACHE_DIR="$SAKURACORD_RUNTIME_DIR/swiftpm-cache"
 # Resolve helpers beside this runtime, even when targeting an older checkout.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/development_launch.sh"
 
+# Debug builds from every checkout share one bundle identifier and account
+# state, so the debug variant matches all of them to keep a single instance.
+# Other variants match only this checkout's bundle, never an installed app.
 sakuracord_scoped_pids() {
-  ps -ww -axo pid=,command= | while read -r pid command; do
-    if [[ "$command" == "$SAKURACORD_EXECUTABLE_PATH" || "$command" == "$SAKURACORD_EXECUTABLE_PATH "* ]]; then
+  ps -ww -axo pid=,comm= | while read -r pid executable; do
+    if [[ "$executable" == "$SAKURACORD_EXECUTABLE_PATH" ]] \
+      || [[ "$SAKURACORD_APP_VARIANT" == debug && "$executable" == /*"/$SAKURACORD_APP_NAME.app/Contents/MacOS/$SAKURACORD_APP_NAME" ]]; then
       printf '%s\n' "$pid"
     fi
   done
@@ -82,8 +110,9 @@ sakuracord_launch_scoped_app() {
 
   local pids
   pids="$(sakuracord_scoped_pids)"
-  if [[ -z "$pids" || "$pids" == *$'\n'* ]]; then
-    echo "Expected one SakuraCord instance after launch (PIDs: $pids)." >&2
+  if [[ -z "$pids" || "$pids" == *$'\n'* ]] \
+    || [[ "$(ps -o comm= -p "$pids")" != "$SAKURACORD_EXECUTABLE_PATH" ]]; then
+    echo "Expected one $SAKURACORD_APP_NAME instance, from this checkout, after launch (PIDs: $pids)." >&2
     return 1
   fi
 }

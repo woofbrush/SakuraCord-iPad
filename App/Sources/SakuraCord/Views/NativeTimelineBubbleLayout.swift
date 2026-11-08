@@ -6,9 +6,6 @@ struct NativeTimelineBubbleRegion {
     let frame: CGRect
     let isOutgoing: Bool
     let showsTail: Bool
-    /// Emoji and stickers stand on their own without a fill or tail, but keep
-    /// the bubble's geometry for highlights and alignment.
-    var isBare = false
 }
 
 @MainActor
@@ -25,31 +22,25 @@ enum NativeTimelineBubbleLayout {
     }
 
     static var horizontalPadding: CGFloat { InterfaceScale.metric(12) }
+    static var verticalPadding: CGFloat { InterfaceScale.metric(8) }
+    /// The height of a bubble holding one line of text.
+    static var oneLineHeight: CGFloat {
+        MessageRowLayoutMetrics.compactContentHeight + verticalPadding * 2
+    }
     /// No taller than a one-line bubble, which the avatar is bottom-aligned to.
     static var avatarDiameter: CGFloat { InterfaceScale.metric(32) }
 
     static func context(
         for message: Message,
-        model: AppModel?
+        source: AppModel?
     ) -> Context {
-        let isEnabled =
-            model?.appearanceSettings.messageAppearance == .bubbles
-                && !message.type.hasGeneratedContent
-        // Standard message layout never consumes bubble identity. Avoid an
-        // account-wide channel search for every newly paginated message.
-        guard isEnabled else {
-            return Context(isEnabled: false, isOutgoing: false, showsAvatar: true)
-        }
-        let selectedChannel = model?.selectedChannel
-        let channel = selectedChannel?.id == message.channelID
-            ? selectedChannel
-            : model?.snapshot?.channels.first { $0.id == message.channelID }
-        return Context(
-            isEnabled: isEnabled,
-            isOutgoing: isEnabled
-                && message.author.id == model?.snapshot?.currentUser.id,
-            showsAvatar: channel?.kind != .directMessage
-        )
+        source?.bubbleContext(for: message)
+            ?? Context(isEnabled: false, isOutgoing: false, showsAvatar: true)
+    }
+
+    /// One-to-one conversations leave incoming bubbles without avatars.
+    static func showsAvatar(in channel: Channel?) -> Bool {
+        channel?.kind != .directMessage
     }
 
     /// The widest a bubble's content column may grow in a timeline row.
@@ -77,7 +68,7 @@ enum NativeTimelineBubbleLayout {
                 preferredWidth,
                 measuredTextWidth(
                     content.framesetter,
-                    length: attributedContent.length,
+                    value: attributedContent,
                     maximumWidth: maximumWidth
                 )
             )
@@ -93,12 +84,19 @@ enum NativeTimelineBubbleLayout {
                 min(maximumWidth, linkedImageWidth)
             )
         }
-        if !message.attachments.isEmpty {
-            let attachmentWidth = message.attachments.compactMap(\.width)
+        let media = message.attachments.filter(\.mediaKind.isVisual)
+        if !media.isEmpty {
+            let attachmentWidth = media.compactMap(\.width)
                 .map(CGFloat.init).max() ?? 360
             preferredWidth = max(
                 preferredWidth,
                 min(maximumWidth, max(InterfaceScale.metric(180), attachmentWidth))
+            )
+        }
+        for file in message.attachments where !file.mediaKind.isVisual {
+            preferredWidth = max(
+                preferredWidth,
+                NativeTimelineFileCard.fittedWidth(for: file, isInBubble: true, maximumWidth: maximumWidth)
             )
         }
         if !message.embeds.isEmpty || !message.components.isEmpty
@@ -149,13 +147,40 @@ enum NativeTimelineBubbleLayout {
             availableWidth - horizontalInset - horizontalPadding
                 - preferredContentWidth
         } else {
-            horizontalInset
-                + (context.showsAvatar ? avatarWidth + columnGap : 0)
-                + horizontalPadding
+            incomingBubbleMinX(
+                horizontalInset: horizontalInset,
+                avatarWidth: avatarWidth,
+                columnGap: columnGap,
+                showsAvatar: context.showsAvatar
+            ) + horizontalPadding
         }
         return Column(
             contentX: contentX,
             contentWidth: preferredContentWidth
+        )
+    }
+
+    /// Where an incoming bubble's leading edge sits, past the avatar column
+    /// when one shows.
+    static func incomingBubbleMinX(
+        horizontalInset: CGFloat,
+        avatarWidth: CGFloat,
+        columnGap: CGFloat,
+        showsAvatar: Bool
+    ) -> CGFloat {
+        horizontalInset + (showsAvatar ? avatarWidth + columnGap : 0)
+    }
+
+    /// The conversation timeline's incoming bubble edge, so chrome outside
+    /// the timeline can line up with the bubbles.
+    static func incomingBubbleMinX(showsAvatar: Bool, settings: InterfaceSettingsSnapshot) -> CGFloat {
+        incomingBubbleMinX(
+            horizontalInset: MessageRowLayoutMetrics.horizontalInset,
+            avatarWidth: MessageRowLayoutMetrics.avatarDiameter,
+            columnGap: MessageRowLayoutMetrics.columnGap(
+                timestampGutterWidth: NativeTimelineCompactTimestampMetrics.width(settings: settings)
+            ),
+            showsAvatar: showsAvatar
         )
     }
 
@@ -180,8 +205,7 @@ enum NativeTimelineBubbleLayout {
         minY: CGFloat,
         maxY: CGFloat,
         isOutgoing: Bool,
-        showsTail: Bool,
-        isBare: Bool
+        showsTail: Bool
     ) -> NativeTimelineBubbleRegion {
         NativeTimelineBubbleRegion(
             frame: CGRect(
@@ -191,8 +215,7 @@ enum NativeTimelineBubbleLayout {
                 height: max(1, maxY - minY)
             ),
             isOutgoing: isOutgoing,
-            showsTail: showsTail && !isBare,
-            isBare: isBare
+            showsTail: showsTail
         )
     }
 
@@ -221,26 +244,29 @@ enum NativeTimelineBubbleLayout {
 
     static func measuredTextWidth(
         _ framesetter: CTFramesetter,
-        length: Int,
+        value: NSAttributedString,
         maximumWidth: CGFloat
     ) -> CGFloat {
-        let size = CTFramesetterSuggestFrameSizeWithConstraints(
+        let width = NativeTimelineMarkdownChromeMetrics.fittedWidth(
             framesetter,
-            CFRange(location: 0, length: length),
-            nil,
-            CGSize(
-                width: max(1, maximumWidth),
-                height: .greatestFiniteMagnitude
-            ),
-            nil
+            value: value,
+            maximumWidth: maximumWidth
         )
-        return min(maximumWidth, ceil(size.width + 1))
+        return min(maximumWidth, ceil(width + 1))
     }
 }
 
 @MainActor
 enum NativeTimelineBubbleDrawing {
     static var cornerRadius: CGFloat { InterfaceScale.metric(18) }
+
+    static func foregroundColor(for region: NativeTimelineBubbleRegion?) -> NSColor {
+        region?.isOutgoing == true ? .white : .labelColor
+    }
+
+    static func secondaryForegroundColor(for region: NativeTimelineBubbleRegion?) -> NSColor {
+        region?.isOutgoing == true ? .white.withAlphaComponent(0.72) : .secondaryLabelColor
+    }
 
     static let incomingFillColor = NSColor(name: nil) { appearance in
         switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
@@ -252,12 +278,10 @@ enum NativeTimelineBubbleDrawing {
     }
 
     static func fillColor(for region: NativeTimelineBubbleRegion) -> NSColor {
-        if region.isBare { return .clear }
         return region.isOutgoing ? .sakuraCordAccentColor : incomingFillColor
     }
 
     static func fill(_ region: NativeTimelineBubbleRegion) {
-        guard !region.isBare else { return }
         fillColor(for: region).setFill()
         path(for: region).fill()
     }

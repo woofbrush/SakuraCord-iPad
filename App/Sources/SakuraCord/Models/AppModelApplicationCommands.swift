@@ -3,6 +3,24 @@ import Foundation
 import SakuraCordModels
 
 extension AppModel {
+    /// Clicking a command mention starts that command in the composer of the
+    /// conversation showing it, as in Discord.
+    func startCommandMention(id: String, name: String, in channelID: ChannelID) {
+        let destination: MessageComposerDestination
+        if channelID == openThread?.id {
+            destination = .thread
+        } else if channelID == selectedChannelID {
+            destination = .channel
+        } else {
+            return
+        }
+        let commandComposer = commandComposer(for: destination)
+        commandComposer.mentionedCommand = .init(id: id, name: name)
+        if !commandComposer.hasLoadedCatalogs, !commandComposer.isLoading {
+            loadApplicationCommands(in: destination)
+        }
+    }
+
     func loadApplicationCommands(in destination: MessageComposerDestination = .channel) {
         let commandComposer = commandComposer(for: destination)
         guard supportedCapabilities.contains(.slashCommands),
@@ -328,8 +346,12 @@ extension AppModel {
                   channelID: channelID, guildID: context.channel.guildID
               )
         else { return }
-        let isNicknameChange = DiscordBuiltInCommands.isBuiltIn(invocation.command) && invocation.command.name == "nick"
+        let isBuiltIn = DiscordBuiltInCommands.isBuiltIn(invocation.command)
+        let isNicknameChange = isBuiltIn && invocation.command.name == "nick"
         guard isNicknameChange || allowSlowmodeSubmission(in: channelID) else { return }
+        if isBuiltIn, Self.builtInMessageText(command: invocation.command.name, message: "") != nil {
+            guard allowOutgoingQueueSubmission() else { return }
+        }
         cancelApplicationCommandAutocompleteTask(in: destination)
         let submittedDraft = commandComposer.draft
         stopLocalTyping(clearThrottle: true)
@@ -479,20 +501,26 @@ extension AppModel {
             }
             return nil
         }
+        func bool(_ name: String) -> Bool {
+            for value in invocation.values where value.name == name {
+                if case let .boolean(flag) = value.argument { return flag }
+            }
+            return false
+        }
         let message = string("message")
         if let text = Self.builtInMessageText(command: invocation.command.name, message: message) {
-            let isTTS = invocation.command.name == "tts"
-            startAccountChildTask(account: session) { model, _ in
-                await model.sendChannelMessage(
-                    channelID: channelID, content: text, replyTo: nil, replyPreview: nil,
-                    attachments: [], clearsComposer: false, isTTS: isTTS
-                )
-            }
+            _ = enqueueChannelMessage(
+                channelID: channelID, content: text, replyTo: nil, replyPreview: nil,
+                attachments: [], clearsComposer: false, isTTS: invocation.command.name == "tts"
+            )
             return
         }
         switch invocation.command.name {
         case "nick":
             runNicknameCommand(string("new_nick"), invocation: invocation)
+        case "leave":
+            // Like Discord, /leave confirms before leaving the group.
+            presentLeaveGroupDirectMessage(for: channelID, silently: bool("silent"))
         case "msg":
             guard let recipient = user("user") else { return }
             startAccountChildTask(account: session) { [weak self] _, session in

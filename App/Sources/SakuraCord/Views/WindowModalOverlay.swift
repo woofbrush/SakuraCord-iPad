@@ -194,10 +194,9 @@ where Presentation.ID: Hashable {
                     AnyView(content(resolvedPresentation, animationState))
                 }
             )
-            overlay.frame = container.bounds
-            overlay.autoresizingMask = [.width, .height]
             overlay.wantsLayer = true
             container.addSubview(overlay, positioned: .above, relativeTo: nil)
+            overlay.fillWindowFrame()
             overlayView = overlay
             if isPresented {
                 overlay.present()
@@ -239,6 +238,7 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
     private let reducesMotion: Bool
     private var isModalPresented = false
     var isPresented: Bool { isModalPresented }
+    var isDismissing: Bool { !animationState.canBeginDismissal }
 
     var capturesEscape: Bool { behavior.capturesEscape }
     var isTopmostPresentedOverlay: Bool {
@@ -262,7 +262,7 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
         content: (WindowModalContext) -> AnyView
     ) {
         self.presentationID = presentationID
-        let reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reducesMotion = !AppMotionPolicy.animates(.overlays)
         self.reducesMotion = reducesMotion
         let animationState = WindowModalContext(
             dismiss: dismiss,
@@ -294,6 +294,21 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// Fills the window frame, over its toolbar. In full screen the toolbar
+    /// is a separate window above this one, so the modal starts below it.
+    func fillWindowFrame() {
+        guard let superview, let window else { return }
+        var frame = superview.bounds
+        if window.styleMask.contains(.fullScreen) {
+            frame.size.height = window.contentLayoutRect.height
+        }
+        self.frame = frame
+    }
+
+    override func resize(withOldSuperviewSize oldSize: NSSize) {
+        fillWindowFrame()
+    }
+
     override func cancelOperation(_ sender: Any?) {
         if behavior.capturesEscape, isTopmostPresentedOverlay {
             animationState.handleEscape()
@@ -314,6 +329,8 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A closing modal's shortcuts must not act on what it uncovers.
+        guard isPresented else { return false }
         if behavior.capturesEscape,
            isTopmostPresentedOverlay,
            event.type == .keyDown,
@@ -342,7 +359,8 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
     }
 
     func present() {
-        guard !isModalPresented else { return }
+        // A closing modal has let go of input, but it is not reopened.
+        guard !isModalPresented, !isDismissing else { return }
         isModalPresented = true
         isHidden = false
         setAccessibilityHidden(false)
@@ -401,6 +419,10 @@ final class WindowModalHostingView: NSHostingView<AnyView> {
             }
         }
         animationState.beginDismissal(committingPresentation: committingPresentation, interactively: interactively)
+        // A closing modal gives up the window's input at once, so what it
+        // covered takes every click, key and gesture as it animates away.
+        isModalPresented = false
+        if let window { WindowModalCoordinator.coordinator(for: window).remove(self) }
     }
 
     func cancelPendingDismissal() {
@@ -415,6 +437,9 @@ final class WindowModalContext {
     var preventsDismissal = false
     /// Starts a feature-owned closing transition and returns its removal delay.
     var dismissalTransition: ((Bool) -> TimeInterval)?
+    /// Runs as the host leaves the window, in the same transaction, so what
+    /// the modal stood in for returns in the frame the modal leaves.
+    var willRemove: (() -> Void)?
     var escapeAction: (() -> Void)?
     fileprivate var requestDismissal: ((Bool, Bool) -> Void)?
     private(set) var isVisible = false
@@ -479,6 +504,7 @@ final class WindowModalContext {
             let delay = customDelay ?? (reduceMotion ? 0 : Double(WindowModalAnimationTiming.removalDelayMilliseconds) / 1_000)
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled else { return }
+            willRemove?()
             if committingPresentation {
                 dismissPresentation()
             }

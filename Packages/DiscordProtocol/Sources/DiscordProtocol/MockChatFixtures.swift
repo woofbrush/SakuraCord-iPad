@@ -1,6 +1,23 @@
 import Foundation
 import SakuraCordModels
 
+/// The servers an offline launch joins beyond the two demo servers.
+public enum MockServerList: Sendable {
+    case standard
+    /// 18 more servers with letter icons, some in folders.
+    case long
+    /// 150 more servers, most with image icons, for rail benchmarks.
+    case performance
+
+    var extraGuildCount: Int {
+        switch self {
+        case .standard: 0
+        case .long: 18
+        case .performance: 150
+        }
+    }
+}
+
 struct MockChatFixture {
     fileprivate struct TimelineFixtureInput {
         let count: Int
@@ -13,6 +30,8 @@ struct MockChatFixture {
         let videoURL: URL?
         let lottieURL: URL?
         let includesAnimatedMedia: Bool
+        let includesVoiceMessages: Bool
+        let includesFiles: Bool
     }
 
     let currentUser: User
@@ -24,23 +43,61 @@ struct MockChatFixture {
 
     static func make(
         now: Date = .now,
-        includesLongServerList: Bool = false,
+        serverList: MockServerList = .standard,
         timelineMessageCount: Int? = nil,
-        timelineIncludesAnimatedMedia: Bool = false
+        timelineIncludesAnimatedMedia: Bool = false,
+        timelineIncludesVoiceMessages: Bool = false,
+        timelineIncludesFiles: Bool = false
     ) -> Self {
         MockFixtureAssembly(
             now: now,
-            includesLongServerList: includesLongServerList,
+            serverList: serverList,
             timelineMessageCount: timelineMessageCount,
-            timelineIncludesAnimatedMedia: timelineIncludesAnimatedMedia
+            timelineIncludesAnimatedMedia: timelineIncludesAnimatedMedia,
+            timelineIncludesVoiceMessages: timelineIncludesVoiceMessages,
+            timelineIncludesFiles: timelineIncludesFiles
         ).fixture
+    }
+
+    static let demoVoiceMessageWaveform =
+        "ACo7H8wIr19qoSG+H4thAAAcpElmVE8WJ0Ic0hyxcwAAIf9dmWpSjSOHOWMETTAAABriOaiCYbMhvkSHeQA="
+
+    /// A voice message playing the bundled synthetic clip. Performance
+    /// fixtures vary `duration` and `waveform` to exercise layout widths.
+    static func voiceMessageAttachment(
+        id: String,
+        duration: Double = 6.2,
+        waveform: String = demoVoiceMessageWaveform
+    ) -> Attachment? {
+        demoResource("demo-voice-message", extension: "ogg").map {
+            Attachment(
+                id: id,
+                filename: VoiceMessageMetadata.filename,
+                url: $0,
+                mediaType: "audio/ogg",
+                size: 18_723,
+                durationSeconds: duration,
+                waveform: waveform
+            )
+        }
+    }
+
+    /// Deterministic 0–255 bins with a speech-like rhythm.
+    static func syntheticVoiceWaveform(seed: Int, duration: Double) -> String {
+        let count = min(max(Int(duration * 10), 32), 256)
+        let bins = (0 ..< count).map { index -> UInt8 in
+            let syllable = sin(Double(index) * 0.9 + Double(seed)) * 0.5 + 0.5
+            let phrase = sin(Double(index) * 0.13 + Double(seed) * 0.7) * 0.5 + 0.5
+            return UInt8(min(255, max(0, (syllable * phrase * 230 + Double((index * 31 + seed) % 25)).rounded())))
+        }
+        return Data(bins).base64EncodedString()
     }
 
     static func demoAsset(_ name: String) -> URL? {
         demoResource(name, extension: "png")
     }
 
-    fileprivate static func demoResource(
+    static func demoResource(
         _ name: String,
         extension fileExtension: String
     ) -> URL? {
@@ -97,6 +154,14 @@ struct MockChatFixture {
         let id = MessageID(rawValue: 5_000_000 + UInt64(index))
         let author = input.users[index % input.users.count]
         let animatedMediaKind = input.includesAnimatedMedia ? index % 12 : -1
+        if input.includesVoiceMessages, index % 5 == 2,
+           let voice = timelineVoiceMessage(input, index: index, id: id, author: author, start: start)
+        {
+            return voice
+        }
+        if input.includesFiles, !index.isMultiple(of: 4) {
+            return timelineFileMessage(input, index: index, id: id, author: author, start: start)
+        }
         let components = timelineComponents(index: index)
         return Message(
             id: id,
@@ -131,6 +196,76 @@ struct MockChatFixture {
                 lottieURL: input.lottieURL
             ),
             mentionedUsers: index % 8 == 4 ? [input.users[1]] : []
+        )
+    }
+
+    /// Three messages in four upload files, cycling through documents,
+    /// archives, code, logs, audio, and an image beside a file, so a long
+    /// timeline exercises every kind of file card and preview.
+    private static func timelineFileMessage(
+        _ input: TimelineFixtureInput,
+        index: Int,
+        id: MessageID,
+        author: User,
+        start: Date
+    ) -> Message {
+        let notes = demoResource("demo-notes", extension: "txt")
+        func file(_ name: String, _ url: URL?, type: String? = nil, size: Int) -> Attachment? {
+            url.map { Attachment(id: "timeline-file-\(index)-\(name)", filename: name, url: $0, mediaType: type, size: size) }
+        }
+        let files: [Attachment?] = switch index % 6 {
+        case 0: [file("release-notes-\(index).pdf", notes, size: 1_482_113), file("SakuraCord-\(index).zip", notes, size: 48_211_456)]
+        case 1: [file("FileCard\(index).swift", notes, type: "text/plain", size: 7_340)]
+        case 2: [file("field-recording-\(index).ogg", demoResource("demo-voice-message", extension: "ogg"), type: "audio/ogg", size: 18_723)]
+        case 3: [
+            input.mediaURL.map {
+                Attachment(id: "timeline-file-\(index)-image", filename: "shot-\(index).png", url: $0, mediaType: "image/png", width: 720, height: 420, size: 120_000)
+            },
+            file("notes-\(index).txt", notes, type: "text/plain", size: 218),
+        ]
+        case 4: [
+            file("budget-\(index).numbers", notes, size: 220_416), file("payload-\(index).bin", notes, size: 26),
+            file("README-\(index).md", demoResource("README", extension: "md"), type: "text/markdown", size: 796),
+        ]
+        default: [file("build-\(index).log", notes, type: "text/plain", size: 77_312)]
+        }
+        return Message(
+            id: id,
+            channelID: input.channelID,
+            author: author,
+            content: index.isMultiple(of: 3) ? "Files for build \(index)." : "",
+            timestamp: start.addingTimeInterval(Double(index) * 35),
+            attachments: files.compactMap { $0 },
+            guildID: input.guildID
+        )
+    }
+
+    /// Every fifth message is a voice message of varied length, so long
+    /// timelines exercise many players and every waveform width.
+    private static func timelineVoiceMessage(
+        _ input: TimelineFixtureInput,
+        index: Int,
+        id: MessageID,
+        author: User,
+        start: Date
+    ) -> Message? {
+        let duration = 0.8 + Double((index * 7) % 70)
+        guard let attachment = voiceMessageAttachment(
+            id: "timeline-voice-\(index)",
+            duration: duration,
+            waveform: syntheticVoiceWaveform(seed: index, duration: duration)
+        ) else { return nil }
+        return Message(
+            id: id,
+            channelID: input.channelID,
+            author: author,
+            content: "",
+            timestamp: start.addingTimeInterval(Double(index) * 35),
+            replyTo: index > 0 && index.isMultiple(of: 43) ? MessageID(rawValue: id.rawValue - 1) : nil,
+            attachments: [attachment],
+            reactions: timelineReactions(index: index, users: input.users),
+            flags: [.voiceMessage],
+            guildID: input.guildID
         )
     }
 
@@ -392,9 +527,11 @@ struct MockChatFixture {
 
 private struct MockFixtureAssembly {
     let now: Date
-    let includesLongServerList: Bool
+    let serverList: MockServerList
     let timelineMessageCount: Int?
     let timelineIncludesAnimatedMedia: Bool
+    let timelineIncludesVoiceMessages: Bool
+    let timelineIncludesFiles: Bool
 
     var fixture: MockChatFixture {
         let auroraID = GuildID(rawValue: 100)
@@ -405,8 +542,8 @@ private struct MockFixtureAssembly {
         let auroraVoiceCategoryID = ChannelID(rawValue: 193)
         let labCategoryID = ChannelID(rawValue: 290)
         let labVoiceCategoryID = ChannelID(rawValue: 291)
-        let textPermissions: UInt64 = (1 << 0) | (1 << 10) | (1 << 11) | (1 << 15) | (1 << 16) | (1 << 20)
-            | (1 << 34) | (1 << 38) | (1 << 51)
+        let textPermissions: UInt64 = (1 << 0) | (1 << 10) | (1 << 11) | (1 << 15) | (1 << 16) | (1 << 20) | (1 << 46)
+            | (1 << 34) | (1 << 35) | (1 << 38) | (1 << 51)
         let auroraIcon = demoAsset("guild-aurora")
         let nativeLabIcon = demoAsset("guild-native-lab")
         let animatedFixture = animatedDemoAsset()
@@ -502,6 +639,10 @@ private struct MockFixtureAssembly {
                     name: "bug_hunt",
                     guildID: auroraID,
                     assetURL: demoAsset("avatar-juniper")
+                ),
+                DiscordEmoji(
+                    id: "900000000000000104", name: "animated_fixture", isAnimated: true,
+                    guildID: auroraID, assetURL: animatedFixture
                 )
             ],
             nativeLabID: [
@@ -526,17 +667,20 @@ private struct MockFixtureAssembly {
                 )
             ]
         ]
-        let longListGuilds =
-            includesLongServerList
-                ? (0 ..< 18).map { index in
+        let longListIcons = serverList == .performance
+            ? ["guild-aurora", "guild-native-lab", "avatar-maya", "avatar-theo", "avatar-nova"].map(demoAsset)
+                + [animatedFixture, nil]
+            : []
+        let longListGuilds = (0 ..< serverList.extraGuildCount).map { index in
             Guild(
                 id: GuildID(rawValue: UInt64(1000 + index)),
                 name: String(format: "Scroll Test %02d", index + 1),
+                iconURL: longListIcons.isEmpty ? nil : longListIcons[index % longListIcons.count],
                 accentHex: [0xF97316, 0x22C55E, 0x3B82F6, 0xA855F7][index % 4],
                 unreadCount: index.isMultiple(of: 5) ? index + 1 : 0,
                 currentUserPermissions: textPermissions
             )
-        } : []
+        }
 
         let forumTags = [
             ForumTag(id: ForumTagID(rawValue: 8_001), name: "Visual", emojiName: "🖌️"),
@@ -562,7 +706,10 @@ private struct MockFixtureAssembly {
             ),
             Channel(
                 id: ChannelID(rawValue: 210), guildID: auroraID, name: "general",
-                topic: "A relaxed place for the Aurora Studio community", category: "COMMUNITY",
+                topic: "Welcome to **SakuraCord**! A fast, native Discord client for *macOS*.\n\n"
+                    + "Check out the [Roadmap](https://roadmap.sakuracord.app) and "
+                    + "[Documentation](https://sakuracord.app). Have fun with `SwiftUI`!",
+                category: "COMMUNITY",
                 categoryID: communityCategoryID, position: 0, categoryPosition: 1,
                 unreadCount: 3
             ),
@@ -580,6 +727,12 @@ private struct MockFixtureAssembly {
                 id: ChannelID(rawValue: 213), guildID: auroraID, name: "empty-canvas",
                 topic: "A quiet channel ready for its first message", category: "COMMUNITY",
                 categoryID: communityCategoryID, position: 3, categoryPosition: 1
+            ),
+            Channel(
+                id: ChannelID(rawValue: 216), guildID: auroraID, name: "message-showcase",
+                topic: "Text, media, embeds, components, replies, polls, and system messages",
+                category: "COMMUNITY", categoryID: communityCategoryID,
+                position: 6, categoryPosition: 1
             ),
             Channel(
                 id: ChannelID(rawValue: 214), guildID: auroraID, name: "read-only",
@@ -687,6 +840,14 @@ private struct MockFixtureAssembly {
                 ownerID: nova.id,
                 kind: .groupDirectMessage,
                 recipients: [maya, theo, juniper]
+            ),
+            Channel(
+                id: ChannelID(rawValue: 403), guildID: nil, name: theo.displayName, hasExplicitName: false,
+                kind: .directMessage, recipients: [theo], isMessageRequest: true
+            ),
+            Channel(
+                id: ChannelID(rawValue: 404), guildID: nil, name: juniper.displayName, hasExplicitName: false,
+                kind: .directMessage, recipients: [juniper], isMessageRequest: true, isSpam: true
             )
         ]
         channels.append(
@@ -785,7 +946,7 @@ private struct MockFixtureAssembly {
         }
         let guilds = [aurora, nativeLab] + longListGuilds
         let guildRailItems: [GuildRailItem]
-        if includesLongServerList {
+        if !longListGuilds.isEmpty {
             guildRailItems = [
                 .guild(auroraID),
                 .folder(GuildFolder(
@@ -947,8 +1108,22 @@ private struct MockFixtureAssembly {
                 animatedMediaURL: animatedFixture,
                 videoURL: videoFixture,
                 lottieURL: lottieFixture,
-                includesAnimatedMedia: timelineIncludesAnimatedMedia
+                includesAnimatedMedia: timelineIncludesAnimatedMedia,
+                includesVoiceMessages: timelineIncludesVoiceMessages,
+                includesFiles: timelineIncludesFiles
             ))
+        } else {
+            // A short exchange of voice messages for interactive checks.
+            let voiceMessages = [(maya, 2101 as UInt64, 30.0), (nova, 2102, 75.0)].compactMap { author, id, offset in
+                MockChatFixture.voiceMessageAttachment(id: "demo-voice-\(id)").map {
+                    Message(
+                        id: MessageID(rawValue: id), channelID: ChannelID(rawValue: 210), author: author,
+                        content: "", timestamp: now.addingTimeInterval(-600 + offset),
+                        attachments: [$0], flags: [.voiceMessage], guildID: auroraID
+                    )
+                }
+            }
+            messages[ChannelID(rawValue: 210), default: []].append(contentsOf: voiceMessages)
         }
         messages[ChannelID(rawValue: 402)] = [
             message(4021, 402, kai, "Sketched three icon ideas for the nickname dialog — sending them over.", base.addingTimeInterval(1240)),
@@ -997,8 +1172,15 @@ private struct MockFixtureAssembly {
             currentUser: nova,
             snapshot: BootstrapSnapshot(
                 currentUser: nova,
-                friendUserIDs: [maya.id, kai.id],
+                friendUserIDs: [maya.id, kai.id, theo.id],
                 relationshipNicknamesByUserID: friendNicknames,
+                relationships: [
+                    Relationship(id: maya.id, type: .friend, user: maya, since: base),
+                    Relationship(id: kai.id, type: .friend, user: kai, nickname: friendNicknames[kai.id], since: base),
+                    Relationship(id: theo.id, type: .friend, user: theo, since: base),
+                    Relationship(id: juniper.id, type: .incomingRequest, user: juniper),
+                    Relationship(id: rowan.id, type: .outgoingRequest, user: rowan),
+                ],
                 guilds: guilds,
                 guildRailItems: guildRailItems,
                 channels: snapshotChannels,

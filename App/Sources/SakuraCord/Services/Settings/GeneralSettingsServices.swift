@@ -60,7 +60,7 @@ final class SettingsConversationRestorationStore {
     private let defaults: any PreferenceStoring
     private var pendingLaunchRestoration: SettingsConversationRestoration?
 
-    init(defaults: any PreferenceStoring = UserDefaults.standard) {
+    init(defaults: any PreferenceStoring = PRBuildProfile.defaults) {
         self.defaults = defaults
     }
 
@@ -71,6 +71,13 @@ final class SettingsConversationRestorationStore {
             channelID: channelID
         )
         persist(restoration, forKey: Self.globalKey)
+        persist(restoration, forKey: Self.accountKey(accountID))
+    }
+
+    /// Switching accounts returns to that account's last conversation, the
+    /// way a launch can return to the last one overall.
+    func prepareAccountSwitch(to accountID: String) {
+        pendingLaunchRestoration = restoration(forKey: Self.accountKey(accountID))
     }
 
     func preferredAccountID(for destination: SettingsLaunchDestination) -> String? {
@@ -89,6 +96,10 @@ final class SettingsConversationRestorationStore {
         return pendingLaunchRestoration
     }
 
+    private static func accountKey(_ accountID: String) -> String {
+        "\(globalKey).\(accountID)"
+    }
+
     private func restoration(forKey key: String) -> SettingsConversationRestoration? {
         guard let data = defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(SettingsConversationRestoration.self, from: data)
@@ -104,22 +115,39 @@ final class SettingsConversationRestorationStore {
 final class GeneralWindowRestorationStore {
     static let shared = GeneralWindowRestorationStore()
 
-    private static let memberListVisibleKey = "settings.memberListVisible"
     private let defaults: any PreferenceStoring
 
-    init(defaults: any PreferenceStoring = UserDefaults.standard) {
+    init(defaults: any PreferenceStoring = PRBuildProfile.defaults) {
         self.defaults = defaults
     }
 
-    var memberListIsVisible: Bool {
-        guard let value = defaults.object(forKey: Self.memberListVisibleKey) as? Bool else {
-            return true
-        }
-        return value
+    private static func visibilityKey(for context: InspectorContext) -> String {
+        guard case let .appWide(key)? = SettingsPreferenceRegistry.foundation.registration(context.controlID)?.storage
+        else { preconditionFailure("Each sidebar context has an app-wide preference.") }
+        return key
     }
 
-    func recordMemberListVisibility(_ isVisible: Bool) {
-        defaults.set(isVisible, forKey: Self.memberListVisibleKey)
+    /// Conversation kinds saved before they had separate keys start from the shared
+    /// member-list value, then keep their own copy so later changes stay independent.
+    func loadInspectorVisibility() -> InspectorVisibility {
+        let legacyValue = defaults.object(forKey: Self.visibilityKey(for: .server)) as? Bool
+        var visibility = InspectorVisibility()
+        for context in InspectorContext.allCases {
+            let key = Self.visibilityKey(for: context)
+            if let value = defaults.object(forKey: key) as? Bool {
+                visibility[context] = value
+            } else if let legacyValue {
+                visibility[context] = legacyValue
+                defaults.set(legacyValue, forKey: key)
+            }
+        }
+        return visibility
+    }
+
+    func recordInspectorVisibility(_ visibility: InspectorVisibility) {
+        for context in InspectorContext.allCases {
+            defaults.set(visibility[context], forKey: Self.visibilityKey(for: context))
+        }
     }
 }
 

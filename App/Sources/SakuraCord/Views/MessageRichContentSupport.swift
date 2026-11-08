@@ -1,11 +1,56 @@
 import AppKit
 import MessageRendering
 import SakuraCordModels
+import Synchronization
+import UniformTypeIdentifiers
 
 enum DiscordRichMessageMetrics {
     static var maximumWidth: CGFloat { InterfaceScale.metric(520) }
-    static var cardCornerRadius: CGFloat { InterfaceScale.metric(8) }
-    static var cardPadding: CGFloat { InterfaceScale.metric(12) }
+    /// Discord lays Components V2 out up to 600 pixels wide.
+    static var componentsMaximumWidth: CGFloat { px(600) }
+    static var cardCornerRadius: CGFloat { px(8) }
+    static var embedCornerRadius: CGFloat { px(4) }
+    /// A container's 16-pixel padding inside its 1-point border.
+    static var cardPadding: CGFloat { px(16) + InterfaceScale.metric(1) }
+
+    /// One of Discord's CSS pixels. Discord sizes components against its
+    /// 16-pixel message text, which SakuraCord draws at `messageTextSize`,
+    /// so every Discord length keeps its proportion to the text.
+    nonisolated static func px(_ value: CGFloat) -> CGFloat {
+        InterfaceScale.metric((value * InterfaceTypographyMetrics.messageTextSize / 16 * 2).rounded() / 2)
+    }
+}
+
+/// Discord's card colours, shared by embeds and component containers,
+/// resolved from its design tokens for the midnight theme in dark mode, as
+/// the spoiler cover assumes, and the light theme otherwise, then tinted the
+/// way a gradient theme tints them.
+enum DiscordEmbedPalette {
+    /// The grey behind Discord's secondary buttons and its muted borders.
+    static let grey = NSColor(srgbRed: 151 / 255, green: 151 / 255, blue: 159 / 255, alpha: 1)
+
+    /// `--background-surface-high`.
+    static var cardFill: NSColor {
+        themed(NSColor(srgbRed: 10 / 255, green: 10 / 255, blue: 12 / 255, alpha: 1), light: .white)
+    }
+
+    /// `--border-subtle`.
+    static var cardBorder: NSColor {
+        themed(grey.withAlphaComponent(51 / 255), light: grey.withAlphaComponent(71 / 255))
+    }
+
+    /// `--border-normal`, the bar of an embed without a colour.
+    static var defaultAccent: NSColor {
+        themed(grey.withAlphaComponent(61 / 255), light: grey.withAlphaComponent(102 / 255))
+    }
+
+    private static func themed(_ midnight: NSColor, light: NSColor) -> NSColor {
+        let theme = SakuraCordThemeStore.shared.committedTheme
+        return NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return theme.discordTinted(isDark ? midnight : light, isDark: isDark)
+        }
+    }
 }
 
 nonisolated enum DiscordFittingWidthPlan {
@@ -22,14 +67,12 @@ nonisolated enum MessageEmbedPresentation {
     static func visibleEmbeds(
         for message: Message
     ) -> [MessageEmbed] {
-        guard !message.flags.contains(.suppressEmbeds), message.type != .pollResult else { return [] }
-        let linkedEmojiURLs =
-            LinkedImagePresentation(content: message.content)
-                .matchedEmojiURLs
-        let sakuraCordDeepLinkActions = Set(
-            SakuraCordDeepLinkPresentation.all(in: message.content)
-                .map(\.action)
-        )
+        // The content scans below only filter embeds: a row re-laid out for
+        // every frame of a resize paid for them with none to filter.
+        guard !message.embeds.isEmpty, !message.flags.contains(.suppressEmbeds), message.type != .pollResult,
+              message.type != .autoModerationAction
+        else { return [] }
+        let (linkedEmojiURLs, sakuraCordDeepLinkActions) = contentLinks(in: message.content)
         return message.embeds.filter { embed in
             if let url = embed.url,
                let action = SakuraCordDeepLinkPresentation.action(for: url),
@@ -42,10 +85,59 @@ nonisolated enum MessageEmbedPresentation {
         }
     }
 
+    /// What the content links to, by content: a row laid out again at
+    /// another width, as on every frame of a resize, scanned it each time.
+    /// Keyed by the content's exact bytes: equal strings can differ in
+    /// Unicode scalars, which the link parsers tell apart.
+    private static let contentLinkCache = Mutex<[Data: ContentLinks]>([:])
+
+    private typealias ContentLinks = (emojiURLs: Set<URL>, deepLinkActions: Set<SakuraCordDeepLinkAction>)
+
+    private static func contentLinks(in content: String) -> ContentLinks {
+        let key = Data(content.utf8)
+        if let links = contentLinkCache.withLock({ $0[key] }) { return links }
+        let links: ContentLinks = (
+            LinkedImagePresentation(content: content).matchedEmojiURLs,
+            Set(SakuraCordDeepLinkPresentation.all(in: content).map(\.action))
+        )
+        contentLinkCache.withLock { cache in
+            if cache.count >= 2_048 { cache.removeAll(keepingCapacity: true) }
+            cache[key] = links
+        }
+        return links
+    }
+
+    /// Discord represents a multi-image embed as a leading card followed by
+    /// image-only entries with the same URL. Keep independent embeds separate.
+    static func groupedEmbeds(_ embeds: [MessageEmbed]) -> [[MessageEmbed]] {
+        var groups: [[MessageEmbed]] = []
+        for embed in embeds {
+            if let previous = groups.last,
+               previous.count < 4,
+               let first = previous.first,
+               let url = first.url,
+               first.image != nil, first.video == nil,
+               embed.url == url, embed.image != nil, embed.video == nil,
+               kind(for: embed) == .bareMedia,
+               embed.author == nil, embed.title == nil, embed.description == nil,
+               embed.fields.isEmpty, embed.footer == nil, embed.thumbnail == nil,
+               embed.components == nil
+            {
+                groups[groups.count - 1].append(embed)
+            } else {
+                groups.append([embed])
+            }
+        }
+        return groups
+    }
+
     static func visibleMessageContent(
         for message: Message
     ) -> String {
-        visibleMessageContent(
+        if let alert = message.autoModerationAlert {
+            return AutoModAlertPresentation.headline(alert)
+        }
+        return visibleMessageContent(
             message.content,
             embeds: visibleEmbeds(
                 for: message
@@ -76,9 +168,11 @@ nonisolated enum MessageEmbedPresentation {
         let rawURL = trimmed.hasPrefix("<") && trimmed.hasSuffix(">")
             ? String(trimmed.dropFirst().dropLast()) : trimmed
         guard let contentURL = URL(string: rawURL), contentURL.scheme != nil else { return content }
-        let replacesLink = embeds.contains { embed in
-            kind(for: embed) == .bareMedia && embed.url == contentURL
-        }
+        // A multi-image post is a leading card followed by image-only embeds
+        // with the same URL. Only the leading embed decides whether the link
+        // is replaced: a card keeps its link, a direct media link does not.
+        let replacesLink = embeds.first { $0.url == contentURL }
+            .map { kind(for: $0) == .bareMedia } ?? false
         return replacesLink ? "" : content
     }
 }
@@ -88,6 +182,7 @@ nonisolated enum SystemMessagePresentation {
         case profile(UserID)
         case message(guildID: GuildID?, channelID: ChannelID, messageID: MessageID)
         case pins(ChannelID)
+        case editGroup(ChannelID)
 
         var url: URL {
             switch self {
@@ -97,6 +192,8 @@ nonisolated enum SystemMessagePresentation {
                 URL(string: "sakuracord-action://message/\(guildID?.description ?? "@me")/\(channelID)/\(messageID)")!
             case .pins(let channelID):
                 URL(string: "sakuracord-action://pins/\(channelID)")!
+            case .editGroup(let channelID):
+                URL(string: "sakuracord-action://edit-group/\(channelID)")!
             }
         }
     }
@@ -105,6 +202,8 @@ nonisolated enum SystemMessagePresentation {
         let text: String
         let isEmphasized: Bool
         let action: Action?
+        /// Drawn in link color, like Discord's trailing Edit Group action.
+        var isLink = false
 
         static func emphasized(_ text: String, action: Action? = nil) -> Self {
             Self(text: text, isEmphasized: true, action: action)
@@ -113,13 +212,28 @@ nonisolated enum SystemMessagePresentation {
         static func secondary(_ text: String) -> Self {
             Self(text: text, isEmphasized: false, action: nil)
         }
+
+        static func link(_ text: String, action: Action) -> Self {
+            Self(text: text, isEmphasized: false, action: action, isLink: true)
+        }
+    }
+
+    /// What a system message says after its author's name, for one-line
+    /// previews such as a thread card's latest message.
+    static func previewText(for message: Message) -> String {
+        if message.type == .channelPinnedMessage { return "pinned a message to this channel." }
+        var runs = textRuns(for: message)
+        if runs.first?.action == .profile(message.author.id) { runs.removeFirst() }
+        return runs.filter { !$0.isLink }.map(\.text).joined()
+            .trimmingCharacters(in: .whitespaces)
     }
 
     static func label(
         for message: Message,
-        currentUserID: UserID? = nil
+        currentUserID: UserID? = nil,
+        recipient: User? = nil
     ) -> String {
-        textRuns(for: message, currentUserID: currentUserID)
+        textRuns(for: message, currentUserID: currentUserID, recipient: recipient)
             .map(\.text)
             .joined()
     }
@@ -127,11 +241,13 @@ nonisolated enum SystemMessagePresentation {
     static func attributedLabel(
         for message: Message,
         currentUserID: UserID? = nil,
+        recipient: User? = nil,
         baseFontSize: CGFloat,
-        actorColor: NSColor? = nil
+        actorColor: NSColor? = nil,
+        linkColor: NSColor? = nil
     ) -> NSAttributedString {
         let value = NSMutableAttributedString()
-        for run in textRuns(for: message, currentUserID: currentUserID) {
+        for run in textRuns(for: message, currentUserID: currentUserID, recipient: recipient) {
             var attributes: [NSAttributedString.Key: Any] = [
                         .font: NSFont.systemFont(
                             ofSize: baseFontSize,
@@ -139,7 +255,9 @@ nonisolated enum SystemMessagePresentation {
                         ),
                         .foregroundColor: run.action == .profile(message.author.id)
                             ? actorColor ?? NSColor.labelColor
-                            : run.isEmphasized
+                            : run.isLink
+                                ? linkColor ?? NSColor.linkColor
+                                : run.isEmphasized
                                 ? NSColor.labelColor
                                 : NSColor.secondaryLabelColor,
             ]
@@ -162,13 +280,16 @@ nonisolated enum SystemMessagePresentation {
 
     static func textRuns(
         for message: Message,
-        currentUserID: UserID? = nil
+        currentUserID: UserID? = nil,
+        recipient: User? = nil
     ) -> [TextRun] {
         let author = message.author.displayName
         return switch message.type {
         case .recipientAdd, .recipientRemove, .channelNameChange, .channelIconChange,
              .channelPinnedMessage, .userJoin:
             conversationTextRuns(for: message, author: author)
+        case .friendRequestAccepted:
+            friendRequestTextRuns(for: message, currentUserID: currentUserID, recipient: recipient)
         case .pollResult:
             pollResultTextRuns(message)
         case .call:
@@ -189,6 +310,33 @@ nonisolated enum SystemMessagePresentation {
         }
     }
 
+    private static func friendRequestTextRuns(
+        for message: Message,
+        currentUserID: UserID?,
+        recipient: User?
+    ) -> [TextRun] {
+        let acceptedByCurrentUser = message.author.id == currentUserID
+        var runs: [TextRun]
+        if acceptedByCurrentUser, let recipient {
+            runs = [
+                .secondary("You accepted "),
+                .emphasized(recipient.displayName, action: .profile(recipient.id)),
+                .secondary("’s friend request."),
+            ]
+        } else if acceptedByCurrentUser {
+            runs = [.secondary("You accepted a friend request.")]
+        } else {
+            runs = [actorRun(message), .secondary(currentUserID == nil
+                ? " accepted a friend request." : " accepted your friend request.")]
+        }
+        if !message.content.isEmpty {
+            runs.append(.secondary(acceptedByCurrentUser ? " They said: "
+                : currentUserID == nil ? " Note: " : " You said: "))
+            runs.append(.emphasized(message.content))
+        }
+        return runs
+    }
+
     private static func conversationTextRuns(
         for message: Message,
         author: String
@@ -205,6 +353,10 @@ nonisolated enum SystemMessagePresentation {
             ]
         case .recipientRemove:
             let recipientUser = message.mentionedUsers.first
+            // Discord records a member leaving as removing themselves.
+            if recipientUser?.id == message.author.id {
+                return [actorRun(message), .secondary(" left the group.")]
+            }
             let recipient = recipientUser?.displayName ?? "someone"
             return [
                 actorRun(message),
@@ -212,23 +364,34 @@ nonisolated enum SystemMessagePresentation {
                 .emphasized(recipient, action: recipientUser.map { .profile($0.id) }),
                 .secondary(" from the group."),
             ]
+        case .channelNameChange where message.guildID != nil:
+            // A renamed thread or forum post, worded as the first-party client does.
+            return [
+                actorRun(message),
+                .secondary(" changed the channel name: "),
+                .emphasized(message.content),
+            ]
         case .channelNameChange:
+            let editGroup = TextRun.link("Edit Group", action: .editGroup(message.channelID))
             if message.content.isEmpty {
                 return [
                     actorRun(message),
-                    .secondary(" changed the group name."),
+                    .secondary(" changed the group name. "),
+                    editGroup,
                 ]
             }
             return [
                 actorRun(message),
                 .secondary(" changed the group name to "),
                 .emphasized(message.content),
-                .secondary("."),
+                .secondary(". "),
+                editGroup,
             ]
         case .channelIconChange:
             return [
                 actorRun(message),
-                .secondary(" changed the group icon."),
+                .secondary(" changed the group icon. "),
+                .link("Edit Group", action: .editGroup(message.channelID)),
             ]
         case .channelPinnedMessage:
             let target = message.messageReference?.messageID.map {
@@ -368,6 +531,7 @@ nonisolated enum SystemMessagePresentation {
         currentUserID: UserID? = nil
     ) -> String {
         switch message.type {
+        case .friendRequestAccepted: "person.fill.checkmark"
         case .pollResult: "chart.bar.xaxis"
         case .recipientAdd: "arrow.right"
         case .recipientRemove: "arrow.left"
@@ -389,7 +553,8 @@ nonisolated enum SystemMessagePresentation {
         for message: Message,
         currentUserID: UserID? = nil
     ) -> Bool {
-        message.type == .recipientAdd
+        message.type == .friendRequestAccepted
+            || message.type == .recipientAdd
             || message.type == .userJoin
             || (message.type == .call
                 && !isMissedCall(message, currentUserID: currentUserID))
@@ -429,6 +594,9 @@ struct RichMediaItem: Identifiable, Hashable {
     enum Kind: Hashable {
         case image(animated: Bool)
         case video, audio, file
+        /// A text or code file, read and highlighted as its language.
+        case text(language: String)
+        case youtube(YouTubeEmbedPlayback)
     }
 
     var id: String
@@ -442,8 +610,18 @@ struct RichMediaItem: Identifiable, Hashable {
     var kind: Kind
     var isSpoiler: Bool
     var autoplaysInline: Bool
+    var videoPreviewURL: URL?
+    /// The type Discord declares for embed media, whose URL may have no
+    /// extension, such as a tweet's image.
+    var contentType: UTType?
+
+    var canSave: Bool {
+        if case .youtube = kind { return false }
+        return true
+    }
 
     func videoPosterURL(maximumPixelDimension: Int) -> URL? {
+        if let videoPreviewURL { return videoPreviewURL }
         guard kind == .video else { return nil }
         return DiscordVideoPosterURL.url(
             proxyURL: previewURL,
@@ -470,7 +648,7 @@ struct RichMediaItem: Identifiable, Hashable {
             case .animatedImage: .image(animated: true)
             case .video: .video
             case .audio: .audio
-            case .file: .file
+            case .file: attachment.textPreviewLanguage.map { .text(language: $0) } ?? .file
             }
     }
 
@@ -496,10 +674,11 @@ struct RichMediaItem: Identifiable, Hashable {
         }
         isSpoiler = false
         self.autoplaysInline = autoplaysInline
+        contentType = media.contentType.flatMap { UTType(mimeType: $0) }
     }
 
     init?(embed: MessageEmbed, attachments: [Attachment]) {
-        guard var media = embed.image ?? embed.video else { return nil }
+        guard var media = embed.video ?? embed.image else { return nil }
         if let raw = media.url?.absoluteString,
            raw.hasPrefix("attachment://"),
            let attachment = attachments.first(where: {
@@ -525,6 +704,14 @@ struct RichMediaItem: Identifiable, Hashable {
             fallbackTitle: embed.title ?? "Embed media",
             autoplaysInline: embed.type?.lowercased() == "gifv"
         )
+        if embed.video != nil {
+            let preview = embed.thumbnail ?? embed.image
+            videoPreviewURL = preview?.proxyURL ?? preview?.url
+            if let playback = media.url.flatMap(YouTubeEmbedPlayback.init(url:)) {
+                kind = .youtube(playback)
+                url = playback.watchURL
+            }
+        }
     }
 
     init(id: String, media: ComponentMedia, fallbackTitle: String) {
@@ -597,7 +784,7 @@ struct RichMediaItem: Identifiable, Hashable {
         return extensions.contains(url.pathExtension.lowercased())
     }
 
-    private static func isAnimatedImageURL(_ url: URL) -> Bool {
+    static func isAnimatedImageURL(_ url: URL) -> Bool {
         let pathExtension = url.pathExtension.lowercased()
         return pathExtension == "gif" || pathExtension == "apng"
     }
@@ -613,6 +800,9 @@ struct RichMediaItem: Identifiable, Hashable {
     }
 }
 
+/// Discord's media mosaic: one item at its own size, three as a hero beside
+/// a stacked pair, and otherwise rows of two and square rows of three, led by
+/// a full-width hero when the count leaves one over.
 nonisolated enum MediaGalleryPlan {
     static func rowCounts(for count: Int) -> [Int] {
         switch count {
@@ -621,27 +811,24 @@ nonisolated enum MediaGalleryPlan {
         case 2: [2]
         case 3: [1, 2]
         case 4: [2, 2]
-        case 5: [2, 3]
-        case 6: [3, 3]
-        case 7: [1, 3, 3]
-        case 8: [2, 3, 3]
-        case 9: [3, 3, 3]
-        case 10: [1, 3, 3, 3]
-        default: stride(from: 0, to: count, by: 3).map { min(3, count - $0) }
+        default:
+            // Rows of three, after a lone hero or a pair for what is left.
+            (count % 3 == 0 ? [] : [count % 3]) + Array(repeating: 3, count: count / 3)
         }
     }
 
     static func frames(
         count: Int, width: CGFloat, aspectRatios: [CGFloat], intrinsicSizes: [CGSize] = [],
-        spacing: CGFloat
+        spacing: CGFloat, equalWidthColumns: Bool = false
     ) -> [CGRect]
     {
         guard count > 0 else { return [] }
+        let maximumHeight = InterfaceScale.metric(350)
         if count == 1 {
             if let intrinsicSize = intrinsicSizes.first,
                intrinsicSize.width > 0, intrinsicSize.height > 0
             {
-                let scale = min(1, width / intrinsicSize.width, 350 / intrinsicSize.height)
+                let scale = min(1, width / intrinsicSize.width, maximumHeight / intrinsicSize.height)
                 return [
                     CGRect(
                         x: 0, y: 0, width: intrinsicSize.width * scale,
@@ -650,29 +837,33 @@ nonisolated enum MediaGalleryPlan {
                 ]
             }
             let ratio = max(0.2, min(12, aspectRatios.first ?? 16 / 9))
-            let fittedWidth = min(width, 350 * ratio)
-            let fittedHeight = min(350, fittedWidth / ratio)
+            let fittedWidth = min(width, maximumHeight * ratio)
+            let fittedHeight = min(maximumHeight, fittedWidth / ratio)
             return [CGRect(x: 0, y: 0, width: fittedWidth, height: max(InterfaceScale.metric(80), fittedHeight))]
         }
         if count == 3 {
-            let height = min(300, max(190, width * 0.62))
-            let heroWidth = (width - spacing) * 0.64
+            let height = min(maximumHeight, width * 7 / 12)
+            let heroWidth = (width - spacing) * (equalWidthColumns ? 1 / 2 : 2 / 3)
             let stackWidth = width - spacing - heroWidth
+            let stackHeight = (height - spacing) / 2
             return [
                 CGRect(x: 0, y: 0, width: heroWidth, height: height),
-                CGRect(x: heroWidth + spacing, y: 0, width: stackWidth, height: (height - spacing) / 2),
-                CGRect(
-                    x: heroWidth + spacing, y: (height + spacing) / 2, width: stackWidth,
-                    height: (height - spacing) / 2
-                )
+                CGRect(x: heroWidth + spacing, y: 0, width: stackWidth, height: stackHeight),
+                CGRect(x: heroWidth + spacing, y: stackHeight + spacing, width: stackWidth, height: stackHeight)
             ]
         }
+        // A row is as tall as its tallest item at the row's tile width, up
+        // to 280 points, or half the 350-point grid for four items. Rows of
+        // three are square.
+        let rowCap = count == 4 ? (maximumHeight - spacing) / 2 : InterfaceScale.metric(280)
         var result: [CGRect] = []
         var verticalOffset: CGFloat = 0
-        for (rowIndex, columns) in rowCounts(for: count).enumerated() {
+        for columns in rowCounts(for: count) {
             let tileWidth = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
-            let hero = columns == 1 && (count == 7 || count == 10) && rowIndex == 0
-            let height = hero ? min(240, max(150, width * 0.44)) : min(175, max(92, tileWidth * 0.72))
+            let ratios = aspectRatios.dropFirst(result.count).prefix(columns).map { max(0.2, $0) }
+            let height = columns == 3
+                ? tileWidth
+                : min(rowCap, tileWidth / (ratios.min() ?? 1))
             for column in 0 ..< columns {
                 result.append(
                     CGRect(
@@ -700,14 +891,26 @@ nonisolated enum DiscordComponentContainerLayoutPlan {
         idealContent: CGFloat,
         available: CGFloat?,
         maximum: CGFloat,
-        padding: CGFloat,
-        hasAccent: Bool
+        padding: CGFloat
     ) -> CGFloat {
-        let fixedWidth = padding * 2 + (hasAccent ? InterfaceScale.metric(4) : 0)
-        return DiscordFittingWidthPlan.width(
-            ideal: idealContent + fixedWidth,
+        // The accent bar overlays the leading padding, so it adds no width.
+        DiscordFittingWidthPlan.width(
+            ideal: idealContent + padding * 2,
             available: available,
             maximum: maximum
         )
+    }
+}
+
+extension MessageReplyPreview {
+    /// A one-line preview of `message`. A system message is summarized,
+    /// since its content is empty or only a parameter such as a new name.
+    nonisolated static func presenting(_ message: Message) -> Self {
+        var preview = Self(message: message)
+        if message.type.hasGeneratedContent {
+            preview.content = SystemMessagePresentation.previewText(for: message)
+            preview.mediaKind = nil
+        }
+        return preview
     }
 }

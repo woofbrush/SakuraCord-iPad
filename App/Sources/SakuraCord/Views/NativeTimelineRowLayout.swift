@@ -21,6 +21,8 @@ struct NativeTimelineRowLayout {
         /// The still image drawn in the region: the image itself, or a
         /// video's poster frame.
         let previewKey: NativeTimelineMediaKey?
+
+        var placeholder: NativeTimelineMediaPlaceholder? { .init(attachment) }
     }
 
     struct ReactionRegion {
@@ -34,7 +36,7 @@ struct NativeTimelineRowLayout {
         let emojiFrame: CGRect
         let countFrame: CGRect?
         let avatarRegions: [AvatarRegion]
-        let overflowFrame: CGRect?
+        let placeholderAvatarFrames: [CGRect]
     }
 
     struct LinkedImageRegion {
@@ -47,6 +49,8 @@ struct NativeTimelineRowLayout {
             case bareMedia
             case bubbleIntegratedCard
             case card
+            /// Text another card frames, such as an AutoMod alert's.
+            case unframed
         }
 
         struct TextRegion {
@@ -61,6 +65,7 @@ struct NativeTimelineRowLayout {
             let cornerRadius: CGFloat
             let fallbackSystemImage: String
             let maximumPixelDimension: Int
+            let placeholder: NativeTimelineMediaPlaceholder?
         }
 
         let embedID: String
@@ -68,12 +73,21 @@ struct NativeTimelineRowLayout {
         let frame: CGRect
         let textRegions: [TextRegion]
         let imageRegions: [ImageRegion]
-        let mediaFrame: CGRect?
+        var mediaFrame: CGRect?
         let mediaURL: URL?
+        let mediaPreviewURL: URL?
+        let mediaPlaceholder: NativeTimelineMediaPlaceholder?
+        var mediaFillsFrame = false
         let mediaIsVideo: Bool
         let mediaAutoplaysInline: Bool
+        let mediaPosterFillsFrame: Bool
         let accentColor: UInt32?
         let drawsTopSeparator: Bool
+
+        /// Discord rounds a card tighter than the media it otherwise covers.
+        var cornerRadius: CGFloat {
+            kind == .card ? DiscordRichMessageMetrics.embedCornerRadius : DiscordRichMessageMetrics.cardCornerRadius
+        }
     }
 
     struct SakuraCordDeepLinkRegion {
@@ -138,7 +152,16 @@ struct NativeTimelineRowLayout {
     var bubbleRegion: NativeTimelineBubbleRegion?
     var highlightFrame: CGRect?
     var daySeparatorFrame: CGRect?
+    /// The day of a date divider that also carries NEW: Discord folds the two
+    /// into one divider when they fall on the same row.
+    var foldedUnreadDay: Date?
+    /// The rule closing a forum post's original message off from its replies.
+    var postStarterDividerFrame: CGRect?
     var unreadSeparatorFrame: CGRect?
+    /// Where NEW is drawn, on its own or folded into the date divider.
+    var unreadDividerFrame: CGRect? {
+        unreadSeparatorFrame ?? (foldedUnreadDay == nil ? nil : daySeparatorFrame)
+    }
     var avatarFrame: CGRect?
     var compactTimestampFrame: CGRect?
     var authorFrame: CGRect?
@@ -152,6 +175,7 @@ struct NativeTimelineRowLayout {
     var timestampText: NativeIdentityTextPresentation?
     var editedText: NativeIdentityTextPresentation?
     var botBadgeFrame: CGRect?
+    var botBadgeText: NativeIdentityTextPresentation?
     var timestampFrame: CGRect?
     var editedFrame: CGRect?
     var activityIndicators: [ActivityIndicator] = []
@@ -168,6 +192,7 @@ struct NativeTimelineRowLayout {
     var bubbleReferenceConnector: ReferenceConnector?
     var commandInvocationRegion: CommandInvocationRegion?
     var systemIconFrame: CGRect?
+    var suppressedHeader: NativeTimelineSuppressedHeaderLayout?
     var contentFrame: CGRect?
     var attributedContent: NSAttributedString?
     var contentFramesetter: CTFramesetter?
@@ -175,7 +200,38 @@ struct NativeTimelineRowLayout {
     var forwardedBarFrame: CGRect?
     var forwardedSourceRegion: ForwardedSourceRegion?
     var linkedImageRegions: [LinkedImageRegion] = []
+    /// One region per attachment, in message order: a gallery tile or a file card.
     var attachmentRegions: [AttachmentRegion] = []
+    var uploadRings: [UploadRing] = []
+
+    var audioFilePlayers: [NativeTimelineVoiceMessageRegion] = []
+
+    /// File and audio cards.
+    var fileCards: [NativeTimelineFileCard] { attachmentRegions.compactMap(fileCard) }
+
+    /// A file or audio region's card; a gallery tile has none.
+    func fileCard(_ region: AttachmentRegion) -> NativeTimelineFileCard? {
+        let attachment = region.attachment
+        guard !attachment.mediaKind.isVisual else { return nil }
+        return NativeTimelineFileCard(
+            frame: region.frame, attachment: attachment, isInBubble: bubbleRegion != nil
+        )
+    }
+
+    /// A region's outline, which its spoiler cover takes: its file card's,
+    /// or a gallery tile's.
+    func cornerRadius(of region: AttachmentRegion) -> CGFloat {
+        fileCard(region)?.cornerRadius ?? NativeTimelineRowPainter.attachmentCornerRadius
+    }
+
+    var mediaGalleryItemCount: Int {
+        attachmentRegions.count { $0.attachment.mediaKind.isVisual }
+    }
+    var voiceMessageRegion: NativeTimelineVoiceMessageRegion?
+    /// Every voice message and audio file player in the row.
+    var audioPlayers: [NativeTimelineVoiceMessageRegion] {
+        (voiceMessageRegion.map { [$0] } ?? []) + audioFilePlayers
+    }
     var embedFrames: [CGRect] = []
     var embedRegions: [EmbedRegion] = []
     var sakuraCordDeepLinkRegions: [SakuraCordDeepLinkRegion] = []
@@ -187,20 +243,49 @@ struct NativeTimelineRowLayout {
     var addReactionFrame: CGRect?
     var ephemeralRegion: EphemeralRegion?
     var failedFrame: CGRect?
+    var failedRetryFrame: CGRect?
+    /// A local send's failed-send Retry. Its files' upload rings act on
+    /// their own.
+    var deliveryActions: [(frame: CGRect, kind: NativeTimelineFooterActionTarget.Kind)] {
+        [failedRetryFrame.map { ($0, .retrySend) }].compactMap(\.self)
+    }
+
+    func deliveryAction(at point: CGPoint) -> NativeTimelineFooterActionTarget.Kind? {
+        deliveryActions.first { $0.frame.contains(point) }?.kind
+    }
     var pinnedAtFrame: CGRect?
     var pollLayout: NativeTimelinePollLayout?
     var pollResultFrame: CGRect?
+    var autoModAlert: NativeTimelineAutoModAlertLayout?
     var inviteRegions: [NativeTimelineInviteLayout] = []
     var translationRegion: TranslationRegion?
 
     static func make(
         item: NativeMessageTimelineItem,
         width proposedWidth: CGFloat,
-        model: AppModel? = nil,
-        metrics: Metrics? = nil
+        source: AppModel? = nil,
+        metrics: Metrics? = nil,
+        relativeTo date: Date = .now,
+        editingTextHeight: CGFloat? = nil
     ) -> Self {
         let width = max(InterfaceScale.metric(220), proposedWidth)
         switch item {
+        case let .suppressedMessages(group):
+            var result = Self(height: NativeTimelineSuppressedHeaderLayout.contentHeight)
+            var offset: CGFloat = 0
+            if group.day != nil {
+                result.daySeparatorFrame = CGRect(x: InterfaceScale.metric(12), y: offset,
+                                                  width: width - InterfaceScale.metric(24), height: NativeTimelineDateSeparatorMetrics.rowHeight)
+                offset += NativeTimelineDateSeparatorMetrics.rowHeight
+                if group.isUnreadBoundary { result.foldedUnreadDay = group.day }
+            } else if group.isUnreadBoundary {
+                result.unreadSeparatorFrame = CGRect(x: InterfaceScale.metric(12), y: offset,
+                                                     width: width - InterfaceScale.metric(24), height: NativeTimelineUnreadSeparatorMetrics.rowHeight)
+                offset += NativeTimelineUnreadSeparatorMetrics.rowHeight
+            }
+            result.height += offset
+            result.suppressedHeader = .make(group: group, width: width, originY: offset)
+            return result
         case .inboxGroup:
             return Self(height: InboxRowMetrics.headerHeight)
         case .inboxEvent:
@@ -221,7 +306,9 @@ struct NativeTimelineRowLayout {
         case let .beginning(beginning):
             let beginningLayout = NativeTimelineBeginningLayout.make(
                 beginning: beginning,
-                width: width
+                width: width,
+                source: source,
+                relativeTo: date
             )
             return Self(
                 height: beginningLayout.height,
@@ -232,8 +319,10 @@ struct NativeTimelineRowLayout {
                 row: row,
                 isUnreadBoundary: isUnreadBoundary,
                 width: width,
-                model: model,
-                metrics: metrics ?? Metrics(settings: model?.interfaceSettings ?? .defaults)
+                source: source,
+                metrics: metrics ?? Metrics(source: source),
+                relativeTo: date,
+                editingTextHeight: editingTextHeight
             )
             return builder.make()
         }
@@ -244,12 +333,15 @@ struct NativeTimelineBeginningLayout {
     let iconFrame: CGRect
     let titleFrame: CGRect
     let descriptionFrame: CGRect
+    let descriptionBox: NativeTimelineAttributedTextBox
     let dateSeparatorFrame: CGRect?
     let height: CGFloat
 
     static func make(
         beginning: NativeTimelineBeginning,
-        width: CGFloat
+        width: CGFloat,
+        source: AppModel? = nil,
+        relativeTo date: Date = .now
     ) -> Self {
         let horizontalInset: CGFloat = InterfaceScale.metric(16)
         let contentWidth = max(
@@ -261,7 +353,6 @@ struct NativeTimelineBeginningLayout {
             ofSize: NSFont.preferredFont(forTextStyle: .largeTitle).pointSize,
             weight: .bold
         )
-        let descriptionFont = NSFont.interfacePreferredFont(forTextStyle: .body)
         let titleHeight = legacyLargeTitleHeight(
             beginning.title,
             font: titleFont,
@@ -273,9 +364,13 @@ struct NativeTimelineBeginningLayout {
             width: contentWidth,
             height: titleHeight
         )
+        let descriptionBox = NativeTimelineBeginningText.description(
+            beginning,
+            source: source,
+            relativeTo: date
+        )
         let descriptionHeight = textHeight(
-            beginning.description,
-            font: descriptionFont,
+            for: descriptionBox,
             width: contentWidth
         )
         let descriptionFrame = CGRect(
@@ -292,24 +387,26 @@ struct NativeTimelineBeginningLayout {
             iconFrame: iconFrame,
             titleFrame: titleFrame,
             descriptionFrame: descriptionFrame,
+            descriptionBox: descriptionBox,
             dateSeparatorFrame: dateSeparatorFrame,
             height: dateSeparatorFrame?.maxY ?? contentHeight
         )
     }
 
     private static func textHeight(
-        _ value: String,
-        font: NSFont,
+        for box: NativeTimelineAttributedTextBox,
         width: CGFloat
     ) -> CGFloat {
-        let bounds = (value as NSString).boundingRect(
-            with: CGSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
+        let size = CTFramesetterSuggestFrameSizeWithConstraints(
+            box.framesetter,
+            CFRange(location: 0, length: box.value.length),
+            nil,
+            CGSize(width: max(1, width), height: 10_000),
+            nil
         )
         return max(
-            ceil(font.ascender - font.descender + font.leading),
-            ceil(bounds.height)
+            1,
+            ceil(size.height)
         )
     }
 
@@ -451,5 +548,12 @@ struct NativeTimelineSearchPrefixLayout {
             ),
             height: sectionFrame.maxY + 4
         )
+    }
+}
+
+extension NativeTimelineRowLayout {
+    func matchesAuthorPrimaryGuild(for item: NativeMessageTimelineItem, source: AppModel) -> Bool {
+        guard authorFrame != nil, let row = item.messageRow else { return true }
+        return authorPrimaryGuild == source.authorPresentation(for: row.message).user.primaryGuild
     }
 }

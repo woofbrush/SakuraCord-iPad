@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import DiscordProtocol
+import Observation
 import SakuraCordModels
 import Testing
 @testable import SakuraCord
@@ -114,7 +115,7 @@ func `forward destination index warms before the menu is presented`() async thro
 }
 
 @MainActor @Test
-func `open forward search observes live user and guild nickname store updates`() {
+func `open forward search observes live user and guild nickname store updates`() async {
     let currentUser = User(
         id: UserID(rawValue: 1),
         username: "current",
@@ -137,7 +138,15 @@ func `open forward search observes live user and guild nickname store updates`()
     )
 
     let initialRevision = model.forwardSearchSourceRevision
+    let snapshotChanges = AsyncStream<Void>.makeStream()
+    withObservationTracking {
+        _ = model.snapshot
+    } onChange: { snapshotChanges.continuation.yield() }
     model.consumeImmediately(.knownUsersChanged([currentUser, observedUser]))
+    snapshotChanges.continuation.finish()
+    var snapshotInvalidations = 0
+    for await _ in snapshotChanges.stream { snapshotInvalidations += 1 }
+    #expect(snapshotInvalidations == 0)
     #expect(model.forwardSearchSourceRevision == initialRevision + 1)
     #expect(model.snapshot?.knownUsers.contains(observedUser) == true)
 
@@ -148,6 +157,17 @@ func `open forward search observes live user and guild nickname store updates`()
     #expect(model.snapshot?.userSearchAliasesByUserID[observedUser.id] == [
         "Guild nickname",
     ])
+
+    let searchChanges = AsyncStream<Void>.makeStream()
+    withObservationTracking {
+        _ = model.messageSearchUsers
+    } onChange: { searchChanges.continuation.yield() }
+    model.consumeImmediately(.messageSearchUsersChanged([observedUser]))
+    searchChanges.continuation.finish()
+    var searchInvalidations = 0
+    for await _ in searchChanges.stream { searchInvalidations += 1 }
+    #expect(searchInvalidations == 1)
+    #expect(model.messageSearchUsers.contains(observedUser))
 }
 
 @Test func `empty forward search follows pinned history then frecency and omits origin`() {
@@ -935,6 +955,16 @@ func `persisted forward frecency replay is idempotent for one account scope`() {
         kind: .image(animated: false)
     ))
 
+    let spoileredLink = ForwardMessagePreviewPlan.make(message: message(
+        content: "||\(imageURL.absoluteString)||",
+        embeds: [MessageEmbed(
+            type: "image",
+            url: imageURL,
+            image: MessageEmbedMedia(url: imageURL)
+        )]
+    ))
+    #expect(spoileredLink.media?.isSpoiler == true)
+
     let videoURL = try #require(URL(string: "https://cdn.discordapp.com/attachments/1/2/video.mp4"))
     let linkedVideo = ForwardMessagePreviewPlan.make(message: message(
         content: "https://example.com/video",
@@ -1498,7 +1528,7 @@ private actor ForwardSettingsFailureProvider: ChatProvider {
     func send(_ draft: SendMessageDraft) async throws -> Message {
         throw ChatProviderError.invalidRequest("unused")
     }
-    func edit(messageID: MessageID, channelID: ChannelID, content: String) async throws
+    func edit(_ message: Message, content: String) async throws
         -> Message
     {
         throw ChatProviderError.invalidRequest("unused")

@@ -5,16 +5,29 @@ nonisolated enum HoverActionPillMetrics {
     static var spacing: CGFloat { InterfaceScale.metric(1) }
     static var padding: CGFloat { InterfaceScale.metric(4) }
 
-    static func size(controlCount: Int) -> CGSize {
+    static var dividerWidth: CGFloat { 1 + InterfaceScale.metric(3) * 2 }
+
+    static func size(controlCount: Int, dividerCount: Int = 0) -> CGSize {
         let count = max(1, controlCount)
         let diameter = controlDiameter
         return CGSize(
             width:
                 padding * 2
                 + diameter * CGFloat(count)
-                + spacing * CGFloat(count - 1),
+                + spacing * CGFloat(count - 1)
+                + (dividerWidth + spacing) * CGFloat(dividerCount),
             height: padding * 2 + diameter
         )
+    }
+}
+
+struct HoverActionPillDivider: View {
+    var body: some View {
+        Capsule()
+            .fill(Color.primary.opacity(0.16))
+            .frame(width: 1, height: HoverActionPillMetrics.controlDiameter * 0.6)
+            .frame(width: HoverActionPillMetrics.dividerWidth)
+            .accessibilityHidden(true)
     }
 }
 
@@ -102,15 +115,21 @@ struct HoverActionControlLabel<Content: View>: View {
     var diameter: CGFloat = InterfaceScale.metric(28)
     var onHoverChanged: ((Bool) -> Void)?
     @ViewBuilder let content: () -> Content
+    @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
 
     var body: some View {
         content()
             .foregroundStyle(iconColor)
-            .frame(width: diameter, height: diameter)
-            .contentShape(Circle())
-            .background(backgroundColor, in: Circle())
-            .contentShape(Circle())
+            // A glyph sits in a circle; a wider label, such as text, in a
+            // capsule as tall.
+            .frame(minWidth: diameter)
+            .frame(height: diameter)
+            .background(backgroundColor, in: Capsule())
+            // Hover tracks the whole frame, so clicks and the pointer cover
+            // its corners too, outside the capsule.
+            .contentShape(Rectangle())
+            .pointerStyle(isEnabled ? .link : nil)
             .onModalHover {
                 isHovering = $0
                 onHoverChanged?($0)
@@ -124,11 +143,9 @@ struct HoverActionControlLabel<Content: View>: View {
     }
 
     private var backgroundColor: Color {
-        if isHovering {
-            return role == .destructive ? .red.opacity(0.18) : .primary.opacity(0.14)
-        }
-        return isSelected == true
-            ? SakuraCordAccentColor.color.opacity(0.16)
-            : .clear
+        // A selected toggle shows in its accent glyph alone, so it can't be
+        // mistaken for the control under the pointer.
+        guard isHovering, isEnabled else { return .clear }
+        return role == .destructive ? .red.opacity(0.18) : .primary.opacity(0.14)
     }
 }

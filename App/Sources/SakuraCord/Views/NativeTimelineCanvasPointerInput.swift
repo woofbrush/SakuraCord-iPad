@@ -1,7 +1,6 @@
 import AppKit
 import AVFoundation
 import Combine
-import CoreServices
 import CoreText
 import ImageIO
 import Lottie
@@ -17,8 +16,15 @@ extension NativeTimelineCanvasView {
         return sendTransitionBlocksInteractions && hit != nil ? self : hit
     }
 
+    /// Whether the pointer's hover is followed: not while scrolling, nor
+    /// while a workspace motion moves the rows under a still pointer, which
+    /// hit-tested their text on every frame. Each resumes hover once done.
+    var tracksHover: Bool {
+        !suppressesHoverPresentation && !WorkspaceLayoutMotion.isMoving
+    }
+
     override func updateTrackingAreas() {
-        guard !suppressesHoverPresentation,
+        guard tracksHover,
               !sendTransitionBlocksInteractions,
               !overlayBlocksInteractions
         else {
@@ -44,6 +50,7 @@ extension NativeTimelineCanvasView {
     }
 
     override func resetCursorRects() {
+        removeAllToolTips()
         guard WindowModalCoordinator.allowsInput(for: self) else { return }
         guard !suppressesHoverPresentation,
               !sendTransitionBlocksInteractions,
@@ -57,16 +64,21 @@ extension NativeTimelineCanvasView {
               displayedRowOrigin(at: index) < visibleRect.maxY
         {
             if layouts.indices.contains(index) {
+                installContentCursors(at: index, rowOrigin: displayedRowOrigin(at: index))
                 installTextCursorRects(at: index)
                 for codeBlock in codeBlockPointerTargets(at: index) {
                     addCursorRect(
                         codeBlock.copyButtonFrame,
                         cursor: .pointingHand
                     )
+                    addToolTip(codeBlock.copyButtonFrame, owner: self, userData: nil)
                 }
             }
             if layouts.indices.contains(index) {
                 let rowOrigin = displayedRowOrigin(at: index)
+                if let toggle = layouts[index].suppressedHeader?.toggleFrame {
+                    addCursorRect(toggle.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
+                }
                 if case let .loader(isLoading, _) = items[index],
                    !isLoading,
                    let frame = layouts[index].loaderLayout?.controlFrame
@@ -91,16 +103,12 @@ extension NativeTimelineCanvasView {
                         )
                     }
                 }
-                if let frame = layouts[index]
-                    .commandInvocationRegion?.profileFrame
-                {
-                    addCursorRect(
-                        frame.offsetBy(dx: 0, dy: rowOrigin),
-                        cursor: .pointingHand
-                    )
+                if let region = layouts[index].commandInvocationRegion {
+                    addCursorRect(region.profileFrame.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
+                    addCursorRect(region.pillFrame.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
                 }
-                if let frame = layouts[index]
-                    .ephemeralRegion?.dismissFrame
+                for frame in [layouts[index].ephemeralRegion?.dismissFrame].compactMap(\.self)
+                    + layouts[index].deliveryActions.map(\.frame)
                 {
                     addCursorRect(
                         frame.offsetBy(dx: 0, dy: rowOrigin),
@@ -117,11 +125,28 @@ extension NativeTimelineCanvasView {
                     addCursorRect(tag.frame.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
                 }
                 installForwardedSourceCursor(at: index, rowOrigin: rowOrigin)
+                installThreadCardCursor(at: index, rowOrigin: rowOrigin)
+                installReactionCursors(at: index, rowOrigin: rowOrigin)
                 installPollCursors(at: index, rowOrigin: rowOrigin)
                 installInviteCursors(at: index, rowOrigin: rowOrigin)
+                installFileCardCursors(at: index, rowOrigin: rowOrigin)
+                installAudioFileCursors(at: index, rowOrigin: rowOrigin)
+                installComponentCursors(at: index, rowOrigin: rowOrigin)
+                installAutoModAlertCursors(at: index, rowOrigin: rowOrigin)
                 installTranslationCursor(at: index, rowOrigin: rowOrigin)
             }
             index += 1
+        }
+    }
+
+    private func installReactionCursors(at index: Int, rowOrigin: CGFloat) {
+        guard case let .message(row, _, _) = items[index] else { return }
+        let cursor: NSCursor = model?.canUpdateReactions(on: row.message) == true ? .pointingHand : .operationNotAllowed
+        for region in layouts[index].reactionRegions {
+            addCursorRect(region.frame.offsetBy(dx: 0, dy: rowOrigin), cursor: cursor)
+        }
+        if let frame = layouts[index].addReactionFrame, model?.canCreateReactions(on: row.message) == true {
+            addCursorRect(frame.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
         }
     }
 
@@ -129,15 +154,17 @@ extension NativeTimelineCanvasView {
         let item = items[index]
         let layout = layouts[index]
         let rowOrigin = displayedRowOrigin(at: index)
+        let hiddenContainers = hiddenSpoilerContainerFrames(at: index).map { $0.offsetBy(dx: 0, dy: rowOrigin) }
         for selectable in selectableTextRegions(for: item, layout: layout) {
-            addCursorRect(
-                textSelectionInteractionFrame(
-                    region: selectable.region,
-                    frame: selectable.interactionFrame,
-                    rowIndex: index
-                ),
-                cursor: .iBeam
+            let frame = textSelectionInteractionFrame(
+                region: selectable.region,
+                frame: selectable.interactionFrame,
+                rowIndex: index
             )
+            guard !NativeTimelineSpoilerConcealmentPolicy.isInsideHiddenContainer(
+                frame, hiddenContainerFrames: hiddenContainers
+            ) else { continue }
+            addCursorRect(frame, cursor: .iBeam)
             for spoiler in NativeTimelineTextHitTester.spoilerRegions(
                 value: selectable.value,
                 framesetter: selectable.framesetter,
@@ -155,7 +182,7 @@ extension NativeTimelineCanvasView {
                 )
             }
         }
-        for mention in mentionPointerRegions(at: index) {
+        for mention in mentionPointerRegions(at: index) where !mention.isTimestamp {
             addCursorRect(mention.frame, cursor: .pointingHand)
         }
         for selectable in linkPointerTextRegions(for: item, layout: layout) {
@@ -182,14 +209,13 @@ extension NativeTimelineCanvasView {
 
     override func mouseEntered(with event: NSEvent) {
         guard !sendTransitionBlocksInteractions else { return }
-        guard !ComposerOverlayPointerRegion.containsPointer(in: window, at: event.locationInWindow) else {
+        guard !isPointerCovered(at: event.locationInWindow) else {
             clearPointerHoverTargets()
             return
         }
         guard WindowModalCoordinator.allowsInput(for: self) else { return }
-        guard !suppressesHoverPresentation,
+        guard tracksHover,
               !overlayBlocksInteractions,
-              editingMessageID == nil,
               event.trackingArea?.userInfo?["nativeTimelineTrackingKind"]
                 as? String == "row",
               let index = event.trackingArea?.userInfo?[
@@ -197,7 +223,12 @@ extension NativeTimelineCanvasView {
               ] as? Int
         else { return }
         let point = convert(event.locationInWindow, from: nil)
-        guard !actionCapsuleContains(point) else { return }
+        guard !actionCapsuleContains(point) else {
+            // The capsule covers the row's text, so its mentions stop being hovered.
+            setHoveredMention(nil)
+            return
+        }
+        guard !hoversEditingOverlay(at: point) else { return }
         setHoveredRow(index)
         setHoveredPollTarget(pollPointerHit(at: point)?.target)
         setHoveredCompactTimestampRow(
@@ -207,6 +238,7 @@ extension NativeTimelineCanvasView {
             authorNamePointerHit(at: point)
         )
         setHoveredServerTagMessageID(serverTagPointerHit(at: point))
+        setHoveredCommandPillMessageID(commandPillPointerHit(at: point))
         setHoveredMention(
             mentionPointerHit(at: point)
         )
@@ -225,31 +257,34 @@ extension NativeTimelineCanvasView {
         setHoveredForwardedSourceMessageID(
             forwardedSourcePointerHit(at: point)
         )
+        setHoveredThreadMessageID(threadCardPointerHit(at: point))
         setHoveredFooterAction(footerActionPointerHit(at: point))
     }
 
     override func mouseMoved(with event: NSEvent) {
         guard !sendTransitionBlocksInteractions else { return }
-        guard !ComposerOverlayPointerRegion.containsPointer(in: window, at: event.locationInWindow) else {
+        guard !isPointerCovered(at: event.locationInWindow) else {
             clearPointerHoverTargets()
             return
         }
         guard WindowModalCoordinator.allowsInput(for: self) else { return }
-        guard !suppressesHoverPresentation,
-              !overlayBlocksInteractions,
-              editingMessageID == nil
-        else {
+        guard tracksHover, !overlayBlocksInteractions else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard !actionCapsuleContains(point) else {
+            // The capsule covers the row's text, so its mentions stop being hovered.
+            setHoveredMention(nil)
             return
         }
-        let point = convert(event.locationInWindow, from: nil)
-        guard !actionCapsuleContains(point) else { return }
+        guard !hoversEditingOverlay(at: point) else { return }
         setHoveredPollTarget(pollPointerHit(at: point)?.target)
+        updateVoiceMessageHover(at: point)
         synchronizeHoveredRow(at: point)
         setHoveredCompactTimestampRow(
             compactTimestampRowIndex(at: point)
         )
         setHoveredAuthorMessageID(authorNamePointerHit(at: point))
         setHoveredServerTagMessageID(serverTagPointerHit(at: point))
+        setHoveredCommandPillMessageID(commandPillPointerHit(at: point))
         setHoveredMention(mentionPointerHit(at: point))
         setHoveredTextLink(textLinkPointerHit(at: point))
         setHoveredTextSpoiler(textSpoilerPointerHit(at: point))
@@ -260,6 +295,7 @@ extension NativeTimelineCanvasView {
         setHoveredForwardedSourceMessageID(
             forwardedSourcePointerHit(at: point)
         )
+        setHoveredThreadMessageID(threadCardPointerHit(at: point))
         setHoveredFooterAction(footerActionPointerHit(at: point))
         setHoveredReaction(
             reactionPointerHit(at: point),
@@ -355,6 +391,11 @@ extension NativeTimelineCanvasView {
             }
             if let index = event.trackingArea?.userInfo?["nativeTimelineRowIndex"] as? Int,
                items.indices.contains(index),
+               items[index].messageID == hoveredThreadMessageID {
+                setHoveredThreadMessageID(nil)
+            }
+            if let index = event.trackingArea?.userInfo?["nativeTimelineRowIndex"] as? Int,
+               items.indices.contains(index),
                items[index].messageID == hoveredFooterAction?.messageID {
                 setHoveredFooterAction(nil)
             }
@@ -366,11 +407,18 @@ extension NativeTimelineCanvasView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        pointer.didForceClickLookup = false
         guard !overlayBlocksInteractions, !sendTransitionBlocksInteractions else { return }
         window?.makeFirstResponder(self)
         guard event.buttonNumber == 0 else { return }
+        dismissTimestampHover()
         let point = convert(event.locationInWindow, from: nil)
         pressedActivationTarget = nil
+        if beginVoiceMessagePress(at: point) {
+            textSelectionGesture = nil
+            setTextSelection(nil)
+            return
+        }
         if let hit = pollPointerHit(at: point) {
             setHoveredPollTarget(hit.target)
             pressedPollTarget = hit.target
@@ -380,8 +428,8 @@ extension NativeTimelineCanvasView {
             return
         }
         if let target = codeBlockCopyButtonHit(at: point) {
-            setHoveredCodeBlock(target)
             pressedCodeBlockCopyButton = target
+            setHoveredCodeBlock(target)
             textSelectionGesture = nil
             didDragTextSelection = false
             setTextSelection(nil)
@@ -447,117 +495,6 @@ extension NativeTimelineCanvasView {
         }
     }
 
-    override func quickLook(with event: NSEvent) {
-        guard !sendTransitionBlocksInteractions else { return }
-        guard WindowModalCoordinator.allowsInput(for: self),
-              !overlayBlocksInteractions,
-              editingMessageID == nil
-        else {
-            super.quickLook(with: event)
-            return
-        }
-        let point = convert(event.locationInWindow, from: nil)
-        guard let index = rowIndex(at: point.y),
-              items.indices.contains(index),
-              layouts.indices.contains(index),
-              items[index].messageID != nil
-        else {
-            super.quickLook(with: event)
-            return
-        }
-        let local = CGPoint(x: point.x, y: point.y - displayedRowOrigin(at: index))
-        for text in selectableTextRegions(for: items[index], layout: layouts[index]) {
-            guard let hit = NativeTimelineTextHitTester.hit(
-                value: text.value,
-                framesetter: text.framesetter,
-                frame: text.frame,
-                point: local,
-                targetsTextCharacters: true
-            ), hit.mention == nil,
-                text.value.attribute(.attachment, at: hit.characterIndex, effectiveRange: nil) == nil
-            else { continue }
-            guard let lookupRange = dictionaryLookupRange(
-                in: text,
-                itemIdentifier: items[index].identifier,
-                characterIndex: hit.characterIndex
-            ) else { return }
-            let lookupText = text.value.attributedSubstring(from: lookupRange)
-            let lookupIndex = hit.characterIndex - lookupRange.location
-            let term = DCSGetTermRangeInString(nil, lookupText.string as CFString, lookupIndex)
-            let word = term.location == kCFNotFound
-                ? Self.wordRange(at: lookupIndex, in: lookupText.string)
-                : NSRange(location: term.location, length: term.length)
-            guard word.length > 0,
-                  let anchor = NativeTimelineTextHitTester.rangeFrame(
-                      value: text.value,
-                      framesetter: text.framesetter,
-                      frame: text.frame,
-                      range: NSRange(
-                          location: lookupRange.location + word.location,
-                          length: word.length
-                      )
-                  )
-            else { continue }
-            let substring = (lookupText.string as NSString).substring(with: word)
-            guard substring.rangeOfCharacter(from: .letters) != nil else { continue }
-            let rowOrigin = displayedRowOrigin(at: index)
-            // AppKit's automatic expansion of a zero-length range can silently
-            // fail for custom-drawn text. Resolve the system dictionary term first.
-            showDefinition(
-                for: lookupText,
-                range: word,
-                options: nil
-            ) { adjustedRange in
-                let originalLocation = lookupRange.location + adjustedRange.location
-                let firstCharacter = NSRange(location: originalLocation, length: 1)
-                let frame = NativeTimelineTextHitTester.rangeFrame(
-                    value: text.value,
-                    framesetter: text.framesetter,
-                    frame: text.frame,
-                    range: firstCharacter
-                ) ?? anchor
-                let font = text.value.attribute(
-                    .font,
-                    at: min(originalLocation, text.value.length - 1),
-                    effectiveRange: nil
-                ) as? NSFont
-                return NSPoint(
-                    x: frame.minX,
-                    y: frame.maxY + (font?.descender ?? 0) + rowOrigin
-                )
-            }
-            return
-        }
-        super.quickLook(with: event)
-    }
-
-    private func dictionaryLookupRange(
-        in text: SelectableTextRegion,
-        itemIdentifier: NativeMessageTimelineItem.Identifier,
-        characterIndex: Int
-    ) -> NSRange? {
-        var lowerBound = 0
-        var upperBound = text.value.length
-        // AppKit may expand a lookup to surrounding words. Bound its input
-        // at hidden spoilers so that expansion cannot reveal their contents.
-        for range in NativeTimelineTextSpoilers.ranges(in: text.value) {
-            if let key = textSpoilerRevealKey(
-                itemIdentifier: itemIdentifier,
-                region: text.region,
-                rangeLocation: range.location
-            ), spoilerRevealStore.isTextRevealed(key) {
-                continue
-            }
-            if NSMaxRange(range) <= characterIndex {
-                lowerBound = max(lowerBound, NSMaxRange(range))
-            } else {
-                upperBound = min(upperBound, range.location)
-            }
-        }
-        guard characterIndex >= lowerBound, characterIndex < upperBound else { return nil }
-        return NSRange(location: lowerBound, length: upperBound - lowerBound)
-    }
-
     private func forwardedSourcePointerHit(at point: CGPoint) -> MessageID? {
         guard let index = rowIndex(at: point.y),
               items.indices.contains(index),
@@ -570,21 +507,27 @@ extension NativeTimelineCanvasView {
     private func footerActionPointerHit(at point: CGPoint) -> NativeTimelineFooterActionTarget? {
         guard let index = rowIndex(at: point.y),
               items.indices.contains(index),
-              layouts.indices.contains(index),
-              let messageID = items[index].messageID
+              layouts.indices.contains(index)
         else { return nil }
         let local = CGPoint(x: point.x, y: point.y - displayedRowOrigin(at: index))
+        if case let .suppressedMessages(group) = items[index] {
+            guard layouts[index].suppressedHeader?.toggleFrame.contains(local) == true else { return nil }
+            return .init(messageID: group.id, kind: .suppressedToggle)
+        }
+        guard let messageID = items[index].messageID else { return nil }
         if layouts[index].ephemeralRegion?.dismissFrame.contains(local) == true {
             return .init(messageID: messageID, kind: .ephemeralDismiss)
         }
         if layouts[index].translationRegion?.actionFrame?.contains(local) == true {
             return .init(messageID: messageID, kind: .translation)
         }
-        return nil
+        return layouts[index].deliveryAction(at: local).map { .init(messageID: messageID, kind: $0) }
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !pointer.didForceClickLookup else { return }
         guard !overlayBlocksInteractions, !sendTransitionBlocksInteractions else { return }
+        if dragVoiceMessagePress(to: convert(event.locationInWindow, from: nil)) { return }
         if pressedPollTarget != nil {
             setHoveredPollTarget(pollPointerHit(at: convert(event.locationInWindow, from: nil))?.target)
             return
@@ -603,6 +546,10 @@ extension NativeTimelineCanvasView {
                 pressedComponentButton,
                 to: isInside ? 1 : 0
             )
+            return
+        }
+        if case .thread? = pressedActivationTarget {
+            setHoveredThreadMessageID(threadCardPointerHit(at: convert(event.locationInWindow, from: nil)))
             return
         }
         guard let gesture = textSelectionGesture else {
@@ -636,7 +583,12 @@ extension NativeTimelineCanvasView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if pointer.didForceClickLookup {
+            pointer.didForceClickLookup = false
+            return
+        }
         guard !overlayBlocksInteractions, !sendTransitionBlocksInteractions else { return }
+        if endVoiceMessagePress(at: convert(event.locationInWindow, from: nil)) { return }
         if let pressed = pressedPollTarget {
             pressedPollTarget = nil
             setNeedsDisplay(visibleRect)
@@ -671,6 +623,7 @@ extension NativeTimelineCanvasView {
                     == pressedCodeBlockCopyButton.rangeLocation
             {
                 Self.copyText(pressedCodeBlockCopyButton.content)
+                codeCopyControl?.confirmCopy()
             }
             return true
         }
@@ -693,6 +646,8 @@ extension NativeTimelineCanvasView {
             ), let hit
             {
                 switch hit.kind {
+                case let .autoModAlert(action):
+                    activateAutoModAlertAction(action, message: hit.message, anchor: hit.frame)
                 case let .component(region):
                     _ = activateComponentButton(
                         region,
@@ -702,6 +657,12 @@ extension NativeTimelineCanvasView {
                     _ = activateSakuraCordDeepLink(action, message: hit.message)
                 case let .invite(card, expands):
                     activateInvite(card, message: hit.message, expands: expands)
+                case let .fileCard(card):
+                    if card.part(of: hit.target, messageID: hit.message.id) == .card {
+                        previewFileCard(card, message: hit.message, rowIndex: hit.rowIndex)
+                    } else {
+                        activateFileCard(card.attachment)
+                    }
                 }
             }
             return true
@@ -722,21 +683,31 @@ extension NativeTimelineCanvasView {
               let actions
         else { return }
         let item = items[index]
+        let layout = layouts[index]
         let local = CGPoint(
             x: point.x,
             y: point.y - displayedRowOrigin(at: index)
         )
+        if case let .suppressedMessages(group) = item {
+            if layout.suppressedHeader?.toggleFrame.contains(local) == true {
+                toggleSuppressedGroup(group)
+            }
+            return
+        }
         if case let .loader(isLoading, _) = item {
             if !isLoading,
-               layouts[index].loaderLayout?.controlFrame.contains(local)
+               layout.loaderLayout?.controlFrame.contains(local)
                     == true
             {
                 actions.loadEarlier()
             }
             return
         }
+        if case .beginning = item {
+            _ = handleTextClick(in: layout, message: nil, point: local, rowIdentifier: item.identifier)
+            return
+        }
         guard case let .message(row, _, _) = item else { return }
-        let layout = layouts[index]
         if handleComponentClick(
             in: layout,
             message: row.message,
@@ -785,6 +756,13 @@ extension NativeTimelineCanvasView {
             model?.performMessageTranslationCaptionAction(row.message)
             return true
         }
+        switch layout.deliveryAction(at: point) {
+        case .retrySend:
+            actions?.retry(row.message)
+            return true
+        default:
+            break
+        }
         if let tag = layout.serverTagRegion, tag.frame.contains(point),
            let guildID = tag.presentation.identity.guildID {
             showServerTagCard(guildID: guildID, anchor: tag.frame.offsetBy(dx: 0, dy: displayedRowOrigin(at: rowIndex)))
@@ -809,6 +787,10 @@ extension NativeTimelineCanvasView {
                     dy: displayedRowOrigin(at: rowIndex)
                 )
             )
+            return true
+        }
+        if layout.commandInvocationRegion?.pillFrame.contains(point) == true {
+            showCommandInvocation(for: row.message)
             return true
         }
         if let invocation = layout.commandInvocationRegion,
@@ -895,31 +877,15 @@ extension NativeTimelineCanvasView {
                !spoilerRevealStore.isMediaRevealed(revealKey)
             {
                 reveal(revealKey, rowIndex: rowIndex)
-            } else if let presentation =
-                NativeTimelineMediaViewerPlan.attachments(
-                    in: row.message,
-                    selectedAttachmentID: attachment.id,
-                    isRevealed: { [spoilerRevealStore] componentID in
-                        spoilerRevealStore.isMediaRevealed(
-                            NativeTimelineComponentRevealKey(
-                                messageID: row.id,
-                                componentID: componentID
-                            )
-                        )
-                    }
-                )
-            {
-                model?.mediaViewerPresentation = mediaViewerPresentation(
-                    presentation,
-                    sourceFrame: attachmentRegion.frame,
-                    rowIndex: rowIndex,
-                    mediaKey: NativeTimelineMediaKey.attachment(attachment),
-                    cornerRadius: InterfaceScale.metric(8),
-                    fillsFrame: MediaGalleryImagePresentation.fillsFrame(
-                        itemCount: layout.attachmentRegions.count
-                    )
-                )
-            } else {
+            } else if attachment.mediaKind == .video {
+                playInline(
+                    attachment.proxyURL ?? attachment.url, mediaID: attachment.id,
+                    frame: attachmentRegion.frame, rowIndex: rowIndex
+                ) { [weak self, attachmentID = attachment.id] index, layout, message in
+                    guard let region = layout.attachmentRegions.first(where: { $0.attachment.id == attachmentID }) else { return }
+                    _ = self?.openAttachmentInViewer(region, message: message, layout: layout, rowIndex: index)
+                }
+            } else if !openAttachmentInViewer(attachmentRegion, message: row.message, layout: layout, rowIndex: rowIndex) {
                 NSWorkspace.shared.open(attachment.url)
             }
             return true
@@ -939,7 +905,7 @@ extension NativeTimelineCanvasView {
                         NativeTimelineMediaKey.media($0)
                     },
                     cornerRadius: InterfaceScale.metric(8),
-                    fillsFrame: false
+                    fillsFrame: embedRegion.mediaFillsFrame
                 )
             } else if let mediaURL = embedRegion.mediaURL {
                 NSWorkspace.shared.open(mediaURL)
@@ -965,17 +931,14 @@ extension NativeTimelineCanvasView {
     }
 
     func activateReactionPointerHit(_ hit: ReactionPointerHit) {
+        guard model?.canUpdateReactions(on: hit.message) == true else { return }
         switch hit.target {
         case .reaction:
             if let reaction = hit.reaction {
                 actions?.react(reaction.emoji, hit.message)
             }
         case .add:
-            showReactionPicker(
-                for: hit.message,
-                anchor: hit.frame,
-                preferredEdge: .maxX
-            )
+            showReactionPicker(forMessageRow: hit.message)
         }
     }
 
@@ -1030,7 +993,7 @@ extension NativeTimelineCanvasView {
 
     func showMentionProfile(
         for user: User,
-        sourceMessage: Message,
+        sourceMessage: Message?,
         anchor: StablePopoverAnchor
     ) {
         guard let model else { return }
@@ -1051,12 +1014,12 @@ extension NativeTimelineCanvasView {
 
     func showMentionRole(
         _ roleID: RoleID,
-        sourceMessage: Message,
+        sourceMessage: Message?,
         anchor: StablePopoverAnchor
     ) {
         guard let model else { return }
         closeMessageProfilePopover()
-        let guildID = model.messagePresentationGuildID(for: sourceMessage)
+        let guildID = sourceMessage.flatMap { model.messagePresentationGuildID(for: $0) } ?? model.selectedGuildID
         model.showMembers(withRole: roleID, in: guildID)
         showMentionPopover(
             AnyView(
@@ -1073,7 +1036,8 @@ extension NativeTimelineCanvasView {
     func showMentionPopover(
         _ content: AnyView,
         anchor: StablePopoverAnchor,
-        configuration: StablePopoverConfiguration = .interactive
+        configuration: StablePopoverConfiguration = .interactive,
+        presentationIdentity: AnyHashable? = nil
     ) {
         activeMentionPopoverAnchor = anchor
         mentionPopoverCoordinator.update(
@@ -1084,6 +1048,7 @@ extension NativeTimelineCanvasView {
             onDismiss: { [weak self] in
                 self?.activeMentionPopoverAnchor = nil
             },
+            presentationIdentity: presentationIdentity,
             content: content
         )
     }
@@ -1109,11 +1074,14 @@ extension NativeTimelineCanvasView {
             guard let self,
                   event.window === self.window,
                   !self.overlayBlocksInteractions,
-                  !self.sendTransitionBlocksInteractions,
-                  self.editingMessageID == nil
+                  !self.sendTransitionBlocksInteractions
             else { return event }
             let point = self.convert(event.locationInWindow, from: nil)
-            guard let hit = self.reactionPointerHit(at: point) else {
+            // An inline editor's suggestions and its Cancel and Save can
+            // lie over reactions.
+            guard !self.editingOverlayContains(point),
+                  let hit = self.reactionPointerHit(at: point)
+            else {
                 return event
             }
             self.window?.makeFirstResponder(self)
@@ -1209,6 +1177,16 @@ extension NativeTimelineCanvasView {
         synchronizeHoverWithCurrentPointer()
     }
 
+    /// Whether something drawn over the timeline takes the pointer: the
+    /// window toolbar, whose glass the timeline scrolls beneath, or the
+    /// composer's suggestions.
+    private func isPointerCovered(at location: NSPoint? = nil) -> Bool {
+        guard let window else { return false }
+        let point = location ?? window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        return window.toolbarCovers(point)
+            || ComposerOverlayPointerRegion.containsPointer(in: window, at: point)
+    }
+
     private func clearPointerHoverTargets() {
         setHoveredPollTarget(nil)
         setHoveredCompactTimestampRow(nil)
@@ -1220,25 +1198,32 @@ extension NativeTimelineCanvasView {
         setHoveredCodeBlock(nil)
         setHoveredComponentButton(nil)
         setHoveredForwardedSourceMessageID(nil)
+        setHoveredThreadMessageID(nil)
         setHoveredFooterAction(nil)
         setHoveredReaction(nil)
+        updateVoiceMessageHover(at: nil)
         setHoveredRow(nil)
     }
 
     func synchronizeHoverWithCurrentPointer() {
         guard !sendTransitionBlocksInteractions else { return }
-        guard !ComposerOverlayPointerRegion.containsPointer(in: window) else {
+        guard !isPointerCovered() else {
             clearPointerHoverTargets()
             return
         }
-        guard WindowModalCoordinator.allowsInput(for: self), !overlayBlocksInteractions, !suppressesHoverPresentation,
-              editingMessageID == nil,
+        guard WindowModalCoordinator.allowsInput(for: self), !overlayBlocksInteractions, tracksHover,
               window?.isKeyWindow == true
         else { return }
         let point = currentMouseLocationInCanvas()
-        guard !actionCapsuleContains(point) else { return }
+        guard !actionCapsuleContains(point) else {
+            // The capsule covers the row's text, so its mentions stop being hovered.
+            setHoveredMention(nil)
+            return
+        }
+        guard !hoversEditingOverlay(at: point) else { return }
         synchronizeHoveredRow(at: point)
         setHoveredPollTarget(visibleRect.contains(point) ? pollPointerHit(at: point)?.target : nil)
+        updateVoiceMessageHover(at: visibleRect.contains(point) ? point : nil, measuresDuration: false)
         setHoveredCompactTimestampRow(
             visibleRect.contains(point)
                 ? compactTimestampRowIndex(at: point)
@@ -1250,6 +1235,7 @@ extension NativeTimelineCanvasView {
                 : nil
         )
         setHoveredServerTagMessageID(visibleRect.contains(point) ? serverTagPointerHit(at: point) : nil)
+        setHoveredCommandPillMessageID(visibleRect.contains(point) ? commandPillPointerHit(at: point) : nil)
         setHoveredMention(
             visibleRect.contains(point)
                 ? mentionPointerHit(at: point)
@@ -1275,6 +1261,7 @@ extension NativeTimelineCanvasView {
                 ? componentButtonPointerHit(at: point)?.target
                 : nil
         )
+        setHoveredThreadMessageID(visibleRect.contains(point) ? threadCardPointerHit(at: point) : nil)
         setHoveredFooterAction(
             visibleRect.contains(point) ? footerActionPointerHit(at: point) : nil
         )
@@ -1284,8 +1271,23 @@ extension NativeTimelineCanvasView {
         )
     }
 
+    /// The editor and its suggestions cover the rows under them, so
+    /// pointing at them points at the edited row. True when they do.
+    private func hoversEditingOverlay(at point: CGPoint) -> Bool {
+        guard editingOverlayContains(point) else { return false }
+        clearPointerHoverTargets()
+        setHoveredRow(editingRowIndex)
+        return true
+    }
+
+    /// Whether the inline editor, its suggestions or its controls are under `point`.
+    func editingOverlayContains(_ point: CGPoint) -> Bool {
+        editingRowHost?.frame.contains(point) == true || editing.controlsHost?.frame.contains(point) == true
+    }
+
     func actionCapsuleContains(_ point: CGPoint) -> Bool {
-        actionCapsuleHost?.frame.contains(point) == true
+        guard let host = actionCapsuleHost else { return false }
+        return (host.interactiveFrame ?? host.frame).contains(point)
     }
 
     func synchronizeHoveredRow(at point: CGPoint) {
@@ -1302,7 +1304,7 @@ extension NativeTimelineCanvasView {
         guard let index = rowIndex(at: point.y),
               items.indices.contains(index),
               layouts.indices.contains(index),
-              case .message = items[index]
+              items[index].textOwnerID != nil
         else { return nil }
         for mention in mentionPointerRegions(at: index)
         where mention.frame.contains(point) {
@@ -1338,7 +1340,7 @@ extension NativeTimelineCanvasView {
         guard let index = rowIndex(at: point.y),
               items.indices.contains(index),
               layouts.indices.contains(index),
-              items[index].messageID != nil
+              items[index].textOwnerID != nil
         else { return nil }
         let local = CGPoint(
             x: point.x,
@@ -1362,7 +1364,7 @@ extension NativeTimelineCanvasView {
         guard let index = rowIndex(at: point.y),
               items.indices.contains(index),
               layouts.indices.contains(index),
-              items[index].messageID != nil
+              items[index].textOwnerID != nil
         else { return nil }
         let local = CGPoint(
             x: point.x,
@@ -1406,11 +1408,12 @@ extension NativeTimelineCanvasView {
                 value: selectable.value,
                 framesetter: selectable.framesetter,
                 frame: selectable.frame
-            ).filter { $0.presentation.isInteractive }.map { mention in
+            ).filter { $0.presentation.isInteractive || $0.presentation.isTimestamp }.map { mention in
                 MentionPointerRegion(
                     region: selectable.region,
                     characterIndex: mention.characterIndex,
                     rawToken: mention.presentation.rawToken,
+                    isTimestamp: mention.presentation.isTimestamp,
                     frame: mention.frame.offsetBy(
                         dx: 0,
                         dy: rowOrigin
@@ -1494,17 +1497,29 @@ extension NativeTimelineCanvasView {
             x: point.x,
             y: point.y - displayedRowOrigin(at: index)
         )
+        if case let .suppressedMessages(group) = item {
+            guard layout.suppressedHeader?.toggleFrame.contains(local) == true else { return nil }
+            return .suppressedMessages(group.id)
+        }
         if case let .loader(isLoading, _) = item {
             guard !isLoading,
                   layout.loaderLayout?.controlFrame.contains(local) == true
             else { return nil }
             return .loader
         }
+        if case .beginning = item, let messageID = item.textOwnerID {
+            return textActivationTarget(
+                messageID: messageID,
+                itemIdentifier: item.identifier,
+                layout: layout,
+                point: local
+            )
+        }
         guard case let .message(row, _, _) = item else { return nil }
         let message = row.message
         return componentActivationTarget(message: message, layout: layout, point: local)
             ?? textActivationTarget(
-                message: message,
+                messageID: message.id,
                 itemIdentifier: item.identifier,
                 layout: layout,
                 point: local
@@ -1568,7 +1583,7 @@ extension NativeTimelineCanvasView {
     }
 
     private func textActivationTarget(
-        message: Message,
+        messageID: MessageID,
         itemIdentifier: NativeMessageTimelineItem.Identifier,
         layout: NativeTimelineRowLayout,
         point: CGPoint
@@ -1581,7 +1596,7 @@ extension NativeTimelineCanvasView {
                     rangeLocation: spoilerRange.location
                 ), !spoilerRevealStore.isTextRevealed(key) {
                     return .textSpoiler(
-                        message.id,
+                        messageID,
                         text.region,
                         rangeLocation: spoilerRange.location
                     )
@@ -1589,7 +1604,7 @@ extension NativeTimelineCanvasView {
             }
             if let mention = text.hit.mention, mention.isInteractive {
                 return .textMention(
-                    message.id,
+                    messageID,
                     text.region,
                     characterIndex: text.hit.characterIndex,
                     rawToken: mention.rawToken
@@ -1597,7 +1612,7 @@ extension NativeTimelineCanvasView {
             }
             if let url = text.hit.url {
                 return .textURL(
-                    message.id,
+                    messageID,
                     text.region,
                     characterIndex: text.hit.characterIndex,
                     url: url
@@ -1619,6 +1634,9 @@ extension NativeTimelineCanvasView {
         if layout.translationRegion?.actionFrame?.contains(point) == true {
             return .translationAction(message.id)
         }
+        if let kind = layout.deliveryAction(at: point) {
+            return .deliveryAction(message.id, kind)
+        }
         if let tag = layout.serverTagRegion, tag.frame.contains(point),
            let guildID = tag.presentation.identity.guildID {
             return .serverTag(message.id, guildID)
@@ -1636,6 +1654,9 @@ extension NativeTimelineCanvasView {
             == true
         {
             return .invocationProfile(message.id)
+        }
+        if layout.commandInvocationRegion?.pillFrame.contains(point) == true {
+            return .commandPill(message.id)
         }
         if layout.replyFrame?.contains(point) == true,
            let replyID = row.replyMessageID
@@ -1690,6 +1711,25 @@ extension NativeTimelineCanvasView {
         return nil
     }
 
+    /// Enabled buttons, link buttons and selects take the pointing hand at
+    /// their drawn frame. Disabled or loading ones, and those under an
+    /// unrevealed spoiler, keep the arrow.
+    func installComponentCursors(at index: Int, rowOrigin: CGFloat) {
+        guard let messageID = items[index].messageID else { return }
+        for layout in layouts[index].componentLayouts {
+            let hiddenContainers = NativeTimelineSpoilerConcealmentPolicy.hiddenContainerFrames(
+                in: layout, messageID: messageID, store: spoilerRevealStore
+            )
+            let frames = layout.buttons.filter { !$0.isDisabled && !$0.isLoading }.map(\.frame)
+                + layout.selects.filter { !$0.isDisabled && !$0.isLoading }.map(\.frame)
+            for frame in frames where !NativeTimelineSpoilerConcealmentPolicy.isInsideHiddenContainer(
+                frame, hiddenContainerFrames: hiddenContainers
+            ) {
+                addCursorRect(frame.offsetBy(dx: 0, dy: rowOrigin), cursor: .pointingHand)
+            }
+        }
+    }
+
     func componentButtonPointerHit(
         at point: CGPoint
     ) -> ComponentButtonPointerHit? {
@@ -1713,6 +1753,13 @@ extension NativeTimelineCanvasView {
                     frame: (expands ? card.detailsFrame! : card.buttonFrame).offsetBy(dx: 0, dy: rowOrigin))
             }
         }
+        if let button = layouts[index].autoModAlert?.button(at: local) {
+            return ComponentButtonPointerHit(
+                target: NativeTimelineComponentButtonTarget(messageID: row.id, componentID: button.action.rawValue),
+                rowIndex: index, message: row.message, kind: .autoModAlert(button.action),
+                frame: button.frame.offsetBy(dx: 0, dy: rowOrigin)
+            )
+        }
         if let region = layouts[index].sakuraCordDeepLinkRegions.first(
             where: { $0.buttonFrame.contains(local) }
         ) {
@@ -1729,6 +1776,9 @@ extension NativeTimelineCanvasView {
                     dy: rowOrigin
                 )
             )
+        }
+        if let hit = fileCardPointerHit(at: local, rowIndex: index, rowOrigin: rowOrigin, message: row.message) {
+            return hit
         }
         for layout in layouts[index].componentLayouts {
             if layout.containers.contains(where: { container in
@@ -1764,4 +1814,34 @@ extension NativeTimelineCanvasView {
         return nil
     }
 
+}
+
+extension NativeTimelineCanvasView {
+    /// Opens the media viewer at an attachment, zooming from its tile.
+    /// Returns false when the attachment has no viewer presentation.
+    func openAttachmentInViewer(
+        _ region: NativeTimelineRowLayout.AttachmentRegion,
+        message: Message,
+        layout: NativeTimelineRowLayout,
+        rowIndex: Int
+    ) -> Bool {
+        guard let presentation = NativeTimelineMediaViewerPlan.attachments(
+            in: message,
+            selectedAttachmentID: region.attachment.id,
+            isRevealed: { [spoilerRevealStore] componentID in
+                spoilerRevealStore.isMediaRevealed(
+                    NativeTimelineComponentRevealKey(messageID: message.id, componentID: componentID)
+                )
+            }
+        ) else { return false }
+        model?.mediaViewerPresentation = mediaViewerPresentation(
+            presentation,
+            sourceFrame: region.frame,
+            rowIndex: rowIndex,
+            mediaKey: NativeTimelineMediaKey.attachment(region.attachment),
+            cornerRadius: InterfaceScale.metric(8),
+            fillsFrame: MediaGalleryImagePresentation.fillsFrame(itemCount: layout.mediaGalleryItemCount)
+        )
+        return true
+    }
 }

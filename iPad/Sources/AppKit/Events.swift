@@ -126,6 +126,7 @@ public nonisolated final class NSEvent: NSObject {
     public let locationInWindow: CGPoint
     public let modifierFlags: ModifierFlags
     public let timestamp: TimeInterval
+    public var stage: Int { 0 }
     public let clickCount: Int
     public let buttonNumber: Int
     public let characters: String?

@@ -18,6 +18,9 @@ public struct Attachment: Identifiable, Codable, Hashable, Sendable {
     public var flags: AttachmentFlags
     public var isSpoiler: Bool
     public var isAnimated: Bool
+    /// A preview on this Mac, such as a sent video's own file, kept ahead of
+    /// the server's until it is gone. It is never encoded.
+    public var localPreviewURL: URL?
 
     public var mediaKind: AttachmentMediaKind {
         let type = mediaType?.lowercased() ?? ""
@@ -28,10 +31,13 @@ public struct Attachment: Identifiable, Codable, Hashable, Sendable {
         if type.hasPrefix("image/") {
             return .image
         }
-        if type.hasPrefix("video/") {
+        // Like Discord, a pictureless file with an audio extension plays as
+        // audio whatever its type, and other audio types are plain files.
+        let playsAsAudio = (width ?? 0) <= 0 && Self.audioFileExtensions.contains((path as NSString).pathExtension)
+        if type.hasPrefix("video/"), !playsAsAudio {
             return .video
         }
-        if type.hasPrefix("audio/") || durationSeconds != nil || waveform != nil {
+        if playsAsAudio || durationSeconds != nil || waveform != nil {
             return .audio
         }
         return .file
@@ -181,6 +187,16 @@ public enum MessageReactionUpdate: Equatable, Sendable {
     case removeAll(channelID: ChannelID, messageID: MessageID)
     case removeEmoji(channelID: ChannelID, messageID: MessageID, emoji: String)
 
+    /// The affected emoji identity, or nil when all reactions are cleared.
+    public var reactionID: String? {
+        switch self {
+        case .add(_, _, _, let emoji, _), .remove(_, _, _, let emoji, _), .removeEmoji(_, _, let emoji):
+            Reaction(emoji: emoji, count: 0).id
+        case .removeAll:
+            nil
+        }
+    }
+
     public var channelID: ChannelID {
         switch self {
         case .add(let channelID, _, _, _, _),
@@ -204,6 +220,11 @@ public enum MessageReactionUpdate: Equatable, Sendable {
 
 public enum OutboxState: String, Codable, Hashable, Sendable {
     case confirmed, queued, uploading, sending, awaitingReconciliation, failed
+}
+
+/// A definite rejection of a local send, independent of guild membership restrictions.
+public enum MessageSendFailure: Codable, Hashable, Sendable {
+    case autoModeration(explanation: String?)
 }
 
 public struct MessageReplyPreview: Codable, Hashable, Sendable {
@@ -321,6 +342,8 @@ public struct Message: Identifiable, Codable, Hashable, Sendable {
     public var isPinned: Bool
     public var nonce: String?
     public var outboxState: OutboxState
+    public var sendFailure: MessageSendFailure?
+    public var canRetrySending: Bool { outboxState == .failed && sendFailure == nil }
     public var type: DiscordMessageType
     public var flags: MessageFlags
     public var applicationID: ApplicationID?
@@ -359,6 +382,7 @@ public struct Message: Identifiable, Codable, Hashable, Sendable {
         isPinned: Bool = false,
         nonce: String? = nil,
         outboxState: OutboxState = .confirmed,
+        sendFailure: MessageSendFailure? = nil,
         type: DiscordMessageType = .default,
         flags: MessageFlags = [],
         applicationID: ApplicationID? = nil,
@@ -396,6 +420,7 @@ public struct Message: Identifiable, Codable, Hashable, Sendable {
         self.isPinned = isPinned
         self.nonce = nonce
         self.outboxState = outboxState
+        self.sendFailure = sendFailure
         self.type = type
         self.flags = flags
         self.applicationID = applicationID
@@ -423,7 +448,7 @@ public struct Message: Identifiable, Codable, Hashable, Sendable {
         case id, channelID, author, guildMember, content, timestamp, editedTimestamp, replyTo,
              replyPreview
         case attachments, reactions, isPinned, nonce, outboxState, type, flags, applicationID, application
-        case interactionMetadata, guildID, webhookID
+        case interactionMetadata, guildID, webhookID, sendFailure
         case embeds, components, stickers, thread, mentionedUsers, mentionedRoleIDs, mentionsEveryone
         case call, poll, hasPoll, hasActivity, hasSharedClientTheme, hasActivityInstance
         case messageReference, forwardedSnapshot
@@ -447,6 +472,7 @@ public struct Message: Identifiable, Codable, Hashable, Sendable {
         nonce = try values.decodeIfPresent(String.self, forKey: .nonce)
         outboxState =
             try values.decodeIfPresent(OutboxState.self, forKey: .outboxState) ?? .confirmed
+        sendFailure = try values.decodeIfPresent(MessageSendFailure.self, forKey: .sendFailure)
         type = try values.decodeIfPresent(DiscordMessageType.self, forKey: .type) ?? .default
         flags = try values.decodeIfPresent(MessageFlags.self, forKey: .flags) ?? []
         applicationID = try values.decodeIfPresent(ApplicationID.self, forKey: .applicationID)
@@ -511,6 +537,8 @@ public struct SendMessageDraft: Equatable, Sendable {
     public var poll: PollDraft?
     /// Read aloud to members viewing the channel, as Discord's `/tts` sends.
     public var isTTS: Bool
+    /// Sends the single attachment as a voice message.
+    public var voiceMessage: VoiceMessageMetadata?
 
     public init(
         channelID: ChannelID, content: String, replyTo: MessageID? = nil,
@@ -518,7 +546,8 @@ public struct SendMessageDraft: Equatable, Sendable {
         attachmentURLs: [URL] = [],
         attachments: [ForumPostAttachment]? = nil,
         nonce: String = ClientNonce.make(), stickerIDs: [String] = [], poll: PollDraft? = nil,
-        isTTS: Bool = false
+        isTTS: Bool = false,
+        voiceMessage: VoiceMessageMetadata? = nil
     ) {
         self.channelID = channelID
         self.content = content
@@ -530,5 +559,21 @@ public struct SendMessageDraft: Equatable, Sendable {
         self.stickerIDs = stickerIDs
         self.poll = poll
         self.isTTS = isTTS
+        self.voiceMessage = voiceMessage
+    }
+}
+
+/// The attachment metadata Discord requires on a voice message.
+public struct VoiceMessageMetadata: Equatable, Sendable {
+    public static let filename = "voice-message.ogg"
+    public static let contentType = "audio/ogg; codecs=opus"
+
+    public var durationSeconds: Double
+    /// Base64 of 0–255 waveform bins.
+    public var waveform: String
+
+    public init(durationSeconds: Double, waveform: String) {
+        self.durationSeconds = durationSeconds
+        self.waveform = waveform
     }
 }

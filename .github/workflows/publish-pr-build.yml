@@ -2,11 +2,8 @@ name: Publish PR build
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, Pull request metadata]
     types: [completed]
-  pull_request_target:
-    # Refresh discovery from default-branch code; never check out the PR.
-    types: [closed, reopened]
   workflow_dispatch:
     inputs:
       run_id:
@@ -33,6 +30,7 @@ jobs:
   inspect:
     if: >-
       (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.name == 'CI' &&
        github.event.workflow_run.event == 'pull_request' &&
        github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_id != '')
@@ -42,13 +40,13 @@ jobs:
     steps:
       # workflow_run resolves workflow_sha on the trusted default branch. Dispatch
       # is permitted only from main. Never check out workflow_run.head_sha.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - name: Inspect exact successful CI artifact without executing it
         id: inspect
         env:
@@ -78,7 +76,7 @@ jobs:
     # No secrets and no launch of anything from the PR archive.
     runs-on: xcode-27
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
@@ -97,16 +95,19 @@ jobs:
       always() && !cancelled() &&
       ((needs.inspect.outputs.ready == 'true' && needs.verify-signatures.result == 'success') ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_id == '') ||
-       github.event_name == 'pull_request_target')
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.name == 'Pull request metadata' &&
+        github.event.workflow_run.event == 'pull_request_target' &&
+        github.event.workflow_run.conclusion == 'success'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - uses: actions/download-artifact@v8
         if: needs.inspect.outputs.ready == 'true'
         with:
@@ -116,7 +117,7 @@ jobs:
         id: distribution-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.SAKURACORD_BOT_APP_ID }}
+          client-id: ${{ vars.SAKURACORD_BOT_CLIENT_ID }}
           private-key: ${{ secrets.SAKURACORD_BOT_PRIVATE_KEY }}
           owner: SakuraCordApp
           repositories: Builds

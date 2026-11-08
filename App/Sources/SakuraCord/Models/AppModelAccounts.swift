@@ -62,6 +62,15 @@ extension AppModel {
         }
     }
 
+    func markSavedAccountSignInRequired(_ accountID: String) async {
+        await savedAccountStore.markSignInRequired(accountID: accountID)
+        if let index = savedAccounts.firstIndex(where: { $0.accountID == accountID }),
+           !savedAccounts[index].requiresSignIn
+        {
+            savedAccounts[index].signInRequiredAt = .now
+        }
+    }
+
     func switchAccount(to accountID: String) async -> Bool {
         guard accountID != activeAccountID else { return true }
         let preservesWorkspace = sessionState == .workspace
@@ -81,6 +90,7 @@ extension AppModel {
                 errorMessage = "That saved Discord account is no longer available."
                 return false
             }
+            SettingsConversationRestorationStore.shared.prepareAccountSwitch(to: accountID)
             return await connectAuthenticatedAccount(
                 handle,
                 preservesInteractivePresentation: preservesWorkspace
@@ -113,6 +123,7 @@ extension AppModel {
             authenticatedProviderFactory(handle, installationID)
         }
         await nextProvider.updateClientAppState(isFocused: applicationIsActive)
+        await nextProvider.setCaptchaHandler { [weak self] in await self?.solveCaptcha($0) }
         do {
             // Enumerating Keychain item attributes reveals the account handle
             // without necessarily authorizing access to its secret. Preparing
@@ -234,6 +245,7 @@ extension AppModel {
     }
 
     func resetAccountPresentationState() {
+        resetVoiceMessages()
         unreadPresentationRefreshTask?.cancel()
         unreadPresentationRefreshTask = nil
         unreadPresentationPreparationTask?.cancel()
@@ -282,12 +294,16 @@ extension AppModel {
         hasLoadedDiscordEmojiSettings = false
         didAttemptDiscordEmojiSettings = false
         voiceStates = [:]
+        serverRailVoicePreviewStore.clear()
         privateCallsByChannel = [:]
+        reconcilePrivateCallSounds()
         visibleChannels = []
         unreadCategoryIDsByGuild = [:]
         selectedChannel = nil
         selectedGuildID = nil
         selectedChannelID = nil
+        discardSideConversationContext()
+        resetMessageSearches()
         conversationNavigationHistory = ConversationNavigationHistory()
         replaceSelectedMessages(with: [])
         hasCompletedInitialMessageLoad = false
@@ -296,11 +312,15 @@ extension AppModel {
         hasMoreLaterMessages = false
         messageCache = [:]
         pinnedMessages.clear(notifying: self)
+        threadBrowser.clear()
         inbox.clear(notifying: self)
         messageCacheOrder = []
         messageRowCache = [:]
         messageRowCacheOrder = []
         hasMoreCache = [:]
+        detachedMessageWindows = [:]
+        contiguousHistoryBoundaries = [:]
+        threadWindow.cachedCursors = [:]
         threadPreviewMessages = [:]
         threadPreviewParentIDs = [:]
         membersByGuildID = [:]
@@ -463,23 +483,14 @@ extension AppModel {
         replyingTo = nil
         threadReplyingTo = nil
         conversationRefreshJournals.removeAll(keepingCapacity: false)
+        scopedRefreshJournals.removeAll(keepingCapacity: false)
         memberLoadTask?.cancel()
         memberLoadTask = nil
         memberLoadGeneration &+= 1
         cancelConversationNavigation()
-        gifSearchTask?.cancel()
-        gifSearchTask = nil
-        gifPickerLoadTask?.cancel()
-        gifPickerLoadTask = nil
-        gifPickerLoadGeneration &+= 1
-        gifResults = []
-        gifCategories = []
-        gifTrendingPreviewURL = nil
-        favoriteGIFs = []
-        isLoadingGIFs = false
-        isLoadingGIFPicker = false
-        gifFavoriteMutationURL = nil
-        gifErrorMessage = nil
+        resetGIFPicker()
+        gameMentions.loadTask?.cancel()
+        gameMentions = GameMentionState()
         attachmentCompactionGeneration &+= 1
         attachmentCompactionTask?.cancel()
         attachmentCompactionTask = nil
@@ -538,9 +549,10 @@ extension AppModel {
         stickerUserSettings = StickerUserSettings()
         isLoadingStickerPicker = false
         stickerPickerErrorMessage = nil
-        loadingReactionReactors = []
-        failedReactionReactorLoads = [:]
+        resetReactionReactorLoads()
         resetForumLoadAndPresentationState()
+        for outgoing in composer.outbox.draftsByNonce.values { discardVoiceMessageFile(for: outgoing) }
+        attachmentUploads.reset()
         await composer.reset()
     }
 }

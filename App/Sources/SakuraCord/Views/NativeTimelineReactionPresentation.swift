@@ -1,46 +1,15 @@
 import CoreGraphics
 
-nonisolated struct NativeTimelineReactionCountTransition {
-    let from: Int
-    let to: Int
-    let progress: CGFloat
-}
-
-nonisolated enum NativeTimelineReactionCountBaseline {
-    static func canAnimate(
-        hasCapturedVisibleCounts: Bool,
-        hasStoredSnapshot: Bool
-    ) -> Bool {
-        hasCapturedVisibleCounts || hasStoredSnapshot
-    }
-
-    static func previousCount(
-        capturedCount: Int?,
-        storedCountBeforeUpdate: Int?,
-        messageExistedBeforeUpdate: Bool,
-        messageWasPreviouslyVisible: Bool,
-        currentCount: Int
-    ) -> Int {
-        if let capturedCount {
-            return capturedCount
-        }
-        if let storedCountBeforeUpdate {
-            return storedCountBeforeUpdate
-        }
-        if messageExistedBeforeUpdate {
-            return 0
-        }
-        return messageWasPreviouslyVisible ? 0 : currentCount
-    }
-}
-
 nonisolated enum NativeTimelineReactionAddControlGeometry {
     static func iconFrame(in frame: CGRect) -> CGRect {
-        CGRect(
-            x: frame.midX - InterfaceScale.metric(8),
-            y: frame.midY - InterfaceScale.metric(8),
-            width: InterfaceScale.metric(16),
-            height: InterfaceScale.metric(16)
+        let size = InterfaceScale.metric(18)
+        // Center the visible smile rather than the private symbol's font box.
+        let opticalOffset = InterfaceScale.metric(1)
+        return CGRect(
+            x: frame.midX - size / 2,
+            y: frame.midY - size / 2 - opticalOffset,
+            width: size,
+            height: size
         )
     }
 }

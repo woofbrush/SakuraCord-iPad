@@ -9,6 +9,9 @@ nonisolated enum MentionTarget: Hashable, Sendable {
     case unresolved
     case guildNavigation(guildID: GuildID, destination: GuildNavigationMention)
     case user(UserID)
+    case game(String)
+    /// A slash command by its root ID and full name, such as `role add`.
+    case command(id: String, name: String)
     case role(RoleID)
     case channel(ChannelID)
     case linkedChannel(guildID: GuildID?, channelID: ChannelID)
@@ -22,9 +25,54 @@ nonisolated struct MentionPresentation: Hashable, Identifiable, Sendable {
     var avatarURL: URL?
     var colorHex: UInt32?
     var systemImage: String?
+    var isTimestamp = false
 
     var id: String { rawToken }
+    var isGame: Bool {
+        if case .game = target { true } else { false }
+    }
+    var showsAvatar: Bool {
+        if isGame { return avatarURL != nil }
+        if case .user = target { return true }
+        return false
+    }
     var isInteractive: Bool { target != .unresolved }
+    /// Discord sets timestamps in the message's own weight, unlike mentions.
+    var labelWeight: NSFont.Weight { isTimestamp ? .regular : .semibold }
+    /// A game's square icon keeps slightly rounded corners; avatars are round.
+    func avatarCornerRadius(size: CGFloat) -> CGFloat { isGame ? 3 : size / 2 }
+
+    /// A link to a channel, thread or forum post the account does not know.
+    static let unknownChannelLinkLabel = "unknown-channel"
+
+    /// Broadcast, game, timestamp and command mentions carry everything
+    /// they show in the token itself; a game's name and icon load later.
+    private static func selfContainedPresentation(for mention: RenderedMention) -> MentionPresentation {
+        switch mention.kind {
+        case .game:
+            MentionPresentation(
+                rawToken: mention.rawToken,
+                label: "Unknown Game",
+                target: .game(mention.id),
+                systemImage: "gamecontroller.fill"
+            )
+        case .timestamp:
+            MentionPresentation(
+                rawToken: mention.rawToken,
+                label: DiscordTimestampToken(rawToken: mention.rawToken)?.formatted() ?? mention.rawToken,
+                target: .unresolved,
+                isTimestamp: true
+            )
+        case .command:
+            if let name = mention.commandName {
+                MentionPresentation(rawToken: mention.rawToken, label: "/\(name)", target: .command(id: mention.id, name: name))
+            } else {
+                unresolved(mention, label: mention.rawToken)
+            }
+        default:
+            unresolved(mention, label: mention.rawToken)
+        }
+    }
 
     static func fallback(for mention: RenderedMention) -> MentionPresentation {
         switch mention.kind {
@@ -50,6 +98,8 @@ nonisolated struct MentionPresentation: Hashable, Identifiable, Sendable {
                 label: "@unknown-role",
                 target: .role(id)
             )
+        case .broadcast, .game, .timestamp, .command:
+            return selfContainedPresentation(for: mention)
         case .channel:
             guard let id = ChannelID(mention.id) else {
                 return unresolved(
@@ -68,18 +118,18 @@ nonisolated struct MentionPresentation: Hashable, Identifiable, Sendable {
             guard let id = ChannelID(mention.id) else {
                 return unresolved(
                     mention,
-                    label: "unknown-post",
-                    systemImage: ChannelIconPresentation.forumPostSystemImage
+                    label: unknownChannelLinkLabel,
+                    systemImage: ChannelIconPresentation.systemImage(for: .unknown, isHidden: false)
                 )
             }
             return MentionPresentation(
                 rawToken: mention.rawToken,
-                label: "unknown-post",
+                label: unknownChannelLinkLabel,
                 target: .linkedChannel(
                     guildID: mention.messageGuildID.flatMap(GuildID.init),
                     channelID: id
                 ),
-                systemImage: ChannelIconPresentation.forumPostSystemImage
+                systemImage: ChannelIconPresentation.systemImage(for: .unknown, isHidden: false)
             )
         case .message:
             guard let channelID = mention.messageChannelID.flatMap(ChannelID.init),
@@ -127,6 +177,8 @@ struct SelectableMessageTextView: NSViewRepresentable {
     var isSelectable = true
     var foregroundColor: NSColor?
     let mentionPresentations: [String: MentionPresentation]
+    var revealedSpoilerLocations: Set<Int> = []
+    var onRevealSpoiler: (Int) -> Void = { _ in }
     var onMentionClick: (MentionPresentation, StablePopoverAnchor) -> Void = { _, _ in }
     var onURLClick: (URL) -> Bool = { _ in false }
 
@@ -156,6 +208,7 @@ struct SelectableMessageTextView: NSViewRepresentable {
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.onMentionClick = onMentionClick
         textView.onURLClick = onURLClick
+        textView.onRevealSpoiler = onRevealSpoiler
         textView.model = model
         return textView
     }
@@ -163,10 +216,28 @@ struct SelectableMessageTextView: NSViewRepresentable {
     func updateNSView(_ textView: RichMessageNSTextView, context: Context) {
         textView.onMentionClick = onMentionClick
         textView.onURLClick = onURLClick
+        textView.onRevealSpoiler = onRevealSpoiler
         textView.model = model
         textView.isSelectable = isSelectable
         textView.applySakuraCordTextSelectionAppearance()
         configureTextContainer(textView.textContainer)
+        let coordinator = context.coordinator
+        if !TimestampMentionPresentation.tokens(in: source).isEmpty {
+            textView.timestampRefresh = { [weak textView, weak coordinator] date in
+                guard let textView, let coordinator else { return }
+                render(in: textView, coordinator: coordinator, at: date)
+            }
+        } else {
+            textView.timestampRefresh = nil
+        }
+        textView.updateTimestampObservation()
+        render(in: textView, coordinator: coordinator, at: .now)
+    }
+
+    func render(in textView: RichMessageNSTextView, coordinator: Coordinator, at date: Date) {
+        let currentMentions = TimestampMentionPresentation.refreshed(
+            mentionPresentations, source: source, at: date
+        )
         let signature = RichMessageRenderSignature(
             source: source,
             emojiSize: emojiSize,
@@ -174,18 +245,20 @@ struct SelectableMessageTextView: NSViewRepresentable {
             maximumNumberOfLines: maximumNumberOfLines,
             isSelectable: isSelectable,
             foregroundColor: foregroundColor.map(String.init(describing:)),
-            mentionPresentations: mentionPresentations
+            mentionPresentations: currentMentions,
+            revealedSpoilerLocations: revealedSpoilerLocations
         )
         guard textView.renderSignature != signature else { return }
         textView.clearHoveredLink()
         textView.invalidateMeasurementCache()
+        let selectedRanges = textView.renderSignature?.source == source ? textView.selectedRanges : []
         textView.renderSignature = signature
         let rendered = NSMutableAttributedString(
             attributedString: RichMessageAttributedText.make(
                 source: source,
                 emojiSize: emojiSize,
                 baseFontSize: baseFontSize,
-                mentionPresentations: mentionPresentations
+                mentionPresentations: currentMentions
             )
         )
         if let foregroundColor {
@@ -195,11 +268,16 @@ struct SelectableMessageTextView: NSViewRepresentable {
                 range: NSRange(location: 0, length: rendered.length)
             )
         }
-        RichMessageAttributedText.concealSpoilers(in: rendered)
+        RichMessageAttributedText.concealSpoilers(
+            in: rendered,
+            revealedLocations: revealedSpoilerLocations
+        )
         textView.textStorage?.setAttributedString(rendered)
+        let validRanges = selectedRanges.filter { NSMaxRange($0.rangeValue) <= rendered.length }
+        if !validRanges.isEmpty { textView.selectedRanges = validRanges }
         textView.invalidateIntrinsicContentSize()
-        context.coordinator.loadEmojiImages(in: textView)
-        context.coordinator.loadMentionAvatars(in: textView)
+        coordinator.loadEmojiImages(in: textView)
+        coordinator.loadMentionAvatars(in: textView)
     }
 
     func sizeThatFits(
@@ -214,6 +292,8 @@ struct SelectableMessageTextView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: RichMessageNSTextView, coordinator: Coordinator) {
+        RelativeTimestampClock.shared.remove(nsView)
+        nsView.timestampRefresh = nil
         coordinator.cancelEmojiLoads()
         RichMessageSelectionOwnership.remove(nsView)
     }
@@ -297,6 +377,7 @@ private struct RichMessageRenderSignature: Equatable {
     let isSelectable: Bool
     let foregroundColor: String?
     let mentionPresentations: [String: MentionPresentation]
+    let revealedSpoilerLocations: Set<Int>
 }
 
 nonisolated enum RichMessageAttributedText {
@@ -444,16 +525,21 @@ nonisolated enum RichMessageAttributedText {
         return output
     }
 
-    /// Text views cannot reveal spoilers, so every spoiler stays concealed:
-    /// its glyphs, link styling, and inline attachments are hidden behind a
-    /// spoiler background.
+    /// Spoilers are concealed behind a background cover unless revealed by the user.
     @MainActor
-    static func concealSpoilers(in value: NSMutableAttributedString) {
+    static func concealSpoilers(
+        in value: NSMutableAttributedString,
+        revealedLocations: Set<Int> = []
+    ) {
         value.enumerateAttribute(
             .discordMarkdownSpoiler,
             in: NSRange(location: 0, length: value.length)
         ) { rawValue, range, _ in
             guard rawValue != nil else { return }
+            if revealedLocations.contains(range.location) {
+                value.removeAttribute(.discordMarkdownSpoiler, range: range)
+                return
+            }
             NativeTimelineSpoilerAppearance.concealText(in: value, range: range)
             value.removeAttribute(.link, range: range)
             value.enumerateAttribute(.attachment, in: range) { rawAttachment, attachmentRange, _ in
@@ -540,10 +626,31 @@ enum RichMessageCopySerializer {
 }
 
 final class RichMessageNSTextView: NSTextView {
+    var timestampRefresh: ((Date) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateTimestampObservation()
+        if window != nil { timestampRefresh?(.now) }
+    }
+
+    func updateTimestampObservation() {
+        guard window != nil, timestampRefresh != nil else {
+            RelativeTimestampClock.shared.remove(self)
+            return
+        }
+        RelativeTimestampClock.shared.observe(self) { [weak self] date in
+            guard let self, let window, window.occlusionState.contains(.visible),
+                  !isHiddenOrHasHiddenAncestor, !visibleRect.isEmpty else { return }
+            timestampRefresh?(date)
+        }
+    }
+
     fileprivate var renderSignature: RichMessageRenderSignature?
     weak var model: AppModel?
     var onMentionClick: (MentionPresentation, StablePopoverAnchor) -> Void = { _, _ in }
     var onURLClick: (URL) -> Bool = { _ in false }
+    var onRevealSpoiler: (Int) -> Void = { _ in }
     private var hoveredMentionLocation: Int?
     private var hoveredLinkRange: NSRange?
     private var mentionTrackingArea: NSTrackingArea?
@@ -618,9 +725,10 @@ final class RichMessageNSTextView: NSTextView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let mentionTrackingArea { removeTrackingArea(mentionTrackingArea) }
+        // Popovers stay non-key until clicked; their mentions still hover.
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .cursorUpdate],
+            options: [.activeInActiveApp, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate],
             owner: self
         )
         addTrackingArea(area)
@@ -633,6 +741,8 @@ final class RichMessageNSTextView: NSTextView {
         updateHoveredMention(at: point)
         setHoveredLink(link(at: point)?.range)
         super.mouseMoved(with: event)
+        // NSTextView restores the I-beam on every move, even over a mention.
+        updateCursor(at: point)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -643,8 +753,11 @@ final class RichMessageNSTextView: NSTextView {
 
     override func cursorUpdate(with event: NSEvent) {
         guard WindowModalCoordinator.allowsInput(for: self) else { return }
-        let point = convert(event.locationInWindow, from: nil)
-        if mentionAttachment(at: point) == nil, link(at: point) == nil {
+        updateCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private func updateCursor(at point: NSPoint) {
+        if mentionAttachment(at: point) == nil, link(at: point) == nil, hiddenSpoiler(at: point) == nil {
             NSCursor.iBeam.set()
         } else {
             NSCursor.pointingHand.set()
@@ -653,15 +766,24 @@ final class RichMessageNSTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         claimSelectionOwnership()
-        if event.modifierFlags.isDisjoint(with: [.command, .shift, .option, .control]),
-           let (index, attachment) = mentionAttachment(at: convert(event.locationInWindow, from: nil))
-        {
-            let rawToken = attachment.presentation.rawToken
-            guard let anchor = mentionPopoverAnchor(at: index, rawToken: rawToken) else { return }
-            onMentionClick(attachment.presentation, anchor)
-            return
+        let point = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.isDisjoint(with: [.command, .shift, .option, .control]) {
+            if let spoiler = hiddenSpoiler(at: point) {
+                onRevealSpoiler(spoiler.location)
+                return
+            }
+            if let (index, attachment) = mentionAttachment(at: point) {
+                let rawToken = attachment.presentation.rawToken
+                guard let anchor = mentionPopoverAnchor(at: index, rawToken: rawToken) else { return }
+                onMentionClick(attachment.presentation, anchor)
+                return
+            }
         }
         super.mouseDown(with: event)
+    }
+
+    private func hiddenSpoiler(at point: NSPoint) -> NSRange? {
+        SelectableTextSpoilerGeometry.hiddenSpoilerRange(at: point, in: self)
     }
 
     private func mentionAttachment(at point: NSPoint) -> (Int, MentionTextAttachment)? {

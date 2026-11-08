@@ -1,3 +1,4 @@
+import DiscordProtocol
 import Foundation
 
 nonisolated enum AppLaunchMode: Equatable, Sendable {
@@ -12,9 +13,15 @@ nonisolated struct AppLaunchConfiguration: Equatable, Sendable {
     let includesForumPerformanceFixture: Bool
     let includesChatPerformanceFixture: Bool
     let includesChatMediaPerformanceFixture: Bool
+    let includesChatVoicePerformanceFixture: Bool
+    /// A channel full of uploaded files of every kind.
+    let includesChatFilesPerformanceFixture: Bool
+    /// Opens that channel repeatedly, timing each open to its first frame.
+    let runsChannelOpenBenchmark: Bool
     let includesPinsPerformanceFixture: Bool
     let includesIncomingPrivateCallFixture: Bool
     let runsChatPerformanceAutoScroll: Bool
+    let runsForumPerformanceAutoScroll: Bool
     let runsMemberListPerformanceAutoScroll: Bool
     let runsAuthenticatedNavigationBenchmark: Bool
     let runsAuthenticatedAccountSwitchBenchmark: Bool
@@ -23,6 +30,16 @@ nonisolated struct AppLaunchConfiguration: Equatable, Sendable {
     let runsLoadingScrollOverlapBenchmark: Bool
     let runsChatLiveArrivalStress: Bool
     let runsPinsPerformanceAutoScroll: Bool
+    /// A 1,000-friend list, presence churn and a scroll and section-switch benchmark.
+    let runsFriendsPerformanceBenchmark: Bool
+    /// A 150-server rail scrolled, selected and updated with mention badges.
+    let runsServerRailPerformanceBenchmark: Bool
+    /// Mentions arriving in other servers while main-thread time is measured.
+    let runsUnreadChurnBenchmark: Bool
+#if SAKURACORD_MOTION_BENCHMARK
+    /// Fixture threads opened, closed and widened while every frame is recorded.
+    let runsSideChatMotionBenchmark: Bool
+#endif
 
     init(arguments: [String]) {
 #if DEBUG
@@ -61,10 +78,23 @@ nonisolated struct AppLaunchConfiguration: Equatable, Sendable {
             runsMemberListPerformanceAutoScroll = false
         #endif
         includesSignInFixture = arguments.contains("--offline-sign-in")
-        includesLongServerList = arguments.contains("--offline-long-server-list")
-        includesForumPerformanceFixture = arguments.contains("--offline-forum-performance")
+        runsUnreadChurnBenchmark = arguments.contains("--offline-unread-churn")
+        includesLongServerList = arguments.contains("--offline-long-server-list") || runsUnreadChurnBenchmark
+        runsForumPerformanceAutoScroll =
+            arguments.contains("--offline-forum-performance-autoscroll")
+            || arguments.contains("--offline-forum-gallery-resize")
+        includesForumPerformanceFixture =
+            arguments.contains("--offline-forum-performance") || runsForumPerformanceAutoScroll
         includesChatMediaPerformanceFixture =
             arguments.contains("--offline-chat-media-performance-autoscroll")
+        includesChatVoicePerformanceFixture =
+            arguments.contains("--offline-chat-voice-performance")
+            || arguments.contains("--offline-chat-voice-performance-autoscroll")
+        runsChannelOpenBenchmark = arguments.contains("--offline-chat-files-performance-open")
+        includesChatFilesPerformanceFixture =
+            arguments.contains("--offline-chat-files-performance")
+            || arguments.contains("--offline-chat-files-performance-autoscroll")
+            || runsChannelOpenBenchmark
         includesPinsPerformanceFixture =
             arguments.contains("--offline-pins-performance-autoscroll")
         includesIncomingPrivateCallFixture =
@@ -73,30 +103,57 @@ nonisolated struct AppLaunchConfiguration: Equatable, Sendable {
             arguments.contains("--offline-chat-performance-autoscroll")
             || arguments.contains("--offline-chat-performance-live-autoscroll")
             || includesChatMediaPerformanceFixture
+            || arguments.contains("--offline-chat-voice-performance-autoscroll")
+            || arguments.contains("--offline-chat-files-performance-autoscroll")
             || runsAuthenticatedAutoScroll
         runsChatLiveArrivalStress =
             arguments.contains("--offline-chat-performance-live-autoscroll")
         runsPinsPerformanceAutoScroll = includesPinsPerformanceFixture
+        runsFriendsPerformanceBenchmark = arguments.contains("--offline-friends-performance")
+        runsServerRailPerformanceBenchmark = arguments.contains("--offline-server-rail-performance")
+#if SAKURACORD_MOTION_BENCHMARK
+        let isMotionBenchmarkLaunch = arguments.contains("--offline-side-chat-motion")
+        runsSideChatMotionBenchmark = isMotionBenchmarkLaunch
+#else
+        let isMotionBenchmarkLaunch = false
+#endif
         includesChatPerformanceFixture =
             arguments.contains("--offline-chat-performance-autoscroll")
             || arguments.contains("--offline-chat-performance-live-autoscroll")
             || includesChatMediaPerformanceFixture
+            || includesChatVoicePerformanceFixture
+            || includesChatFilesPerformanceFixture
             || arguments.contains("--offline-chat-performance")
             || includesPinsPerformanceFixture
         let testingFlags: Set = [
             "--offline", "--offline-sign-in", "--offline-long-server-list", "--offline-forum-performance",
+            "--offline-forum-performance-autoscroll", "--offline-forum-gallery-resize",
             "--offline-chat-performance", "--offline-chat-performance-autoscroll",
             "--offline-chat-performance-live-autoscroll",
             "--offline-chat-media-performance-autoscroll",
+            "--offline-chat-voice-performance", "--offline-chat-voice-performance-autoscroll",
+            "--offline-chat-files-performance", "--offline-chat-files-performance-autoscroll",
+            "--offline-chat-files-performance-open",
             "--offline-pins-performance-autoscroll",
-            "--offline-incoming-private-call",
+            "--offline-incoming-private-call", "--offline-friends-performance", "--offline-unread-churn",
+            "--offline-server-rail-performance",
         ]
-        mode = arguments.contains(where: testingFlags.contains) ? .offlineTesting : .normal
+        mode = isMotionBenchmarkLaunch || arguments.contains(where: testingFlags.contains) ? .offlineTesting : .normal
+    }
+
+    var mockServerList: MockServerList {
+        if runsServerRailPerformanceBenchmark { return .performance }
+        return includesLongServerList ? .long : .standard
     }
 
     var runsAnyReadOnlyPerformanceBenchmark: Bool {
         runsChatPerformanceAutoScroll
+            || runsChannelOpenBenchmark
+            || runsForumPerformanceAutoScroll
             || runsPinsPerformanceAutoScroll
+            || runsFriendsPerformanceBenchmark
+            || runsServerRailPerformanceBenchmark
+            || runsUnreadChurnBenchmark
             || runsMemberListPerformanceAutoScroll
             || runsAuthenticatedNavigationBenchmark
             || runsAuthenticatedAccountSwitchBenchmark

@@ -56,6 +56,8 @@ public enum MediaDeviceCatalog {
 
     public static func defaultOutputDeviceID() -> AudioDeviceID? { 1 }
 
+    public static func defaultOutputSampleRate() -> Double? { AVAudioSession.sharedInstance().sampleRate }
+
     public static func defaultInputDeviceID() -> AudioDeviceID? { 1 }
 
     private static func info(_ port: AVAudioSessionPortDescription, id: AudioDeviceID, isDefault: Bool) -> AudioDeviceInfo {

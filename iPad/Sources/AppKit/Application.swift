@@ -75,7 +75,9 @@ public final class NSApplication: NSObject {
     public func activate(ignoringOtherApps _: Bool = false) {}
     public func hide(_: Any?) {}
     public func terminate(_: Any?) {}
-    public func requestUserAttention(_: Int) -> Int { 0 }
+    public enum RequestUserAttentionType: Sendable { case criticalRequest, informationalRequest }
+    @discardableResult public func requestUserAttention(_: RequestUserAttentionType) -> Int { 0 }
+    public func cancelUserAttentionRequest(_: Int) {}
     public func orderFrontStandardAboutPanel(_: Any? = nil) {}
     public func orderFrontStandardAboutPanel(options _: [AboutPanelOptionKey: Any]) {}
 
@@ -247,6 +249,23 @@ public final class NSScreen: NSObject {
     public var maximumFramesPerSecond: Int { screen.maximumFramesPerSecond }
 }
 
+/// The system's icon for a file type, which UIKit only exposes on the main actor.
+public nonisolated enum AKFileTypeIcon {
+    public static func cgImage(for type: UTType) -> CGImage? {
+        if Thread.isMainThread { return MainActor.assumeIsolated { load(type) } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { load(type) } }
+    }
+
+    @MainActor
+    private static func load(_ type: UTType) -> CGImage? {
+        let name = "file." + (type.preferredFilenameExtension ?? "dat")
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)
+        let controller = UIDocumentInteractionController(url: url)
+        controller.uti = type.identifier
+        return controller.icons.last?.cgImage
+    }
+}
+
 public final class NSWorkspace: NSObject {
     public static let shared = NSWorkspace()
     public var notificationCenter: NotificationCenter { .default }
@@ -293,6 +312,7 @@ public final class NSWorkspace: NSObject {
 
     public func icon(forFile _: String) -> UIImage { UIImage(systemName: "doc") ?? UIImage() }
 
+    public func urlsForApplications(toOpen _: URL) -> [URL] { [] }
     public func icon(for _: UTType) -> UIImage { UIImage(systemName: "doc") ?? UIImage() }
 }
 
@@ -443,6 +463,7 @@ public nonisolated final class SMAppService: NSObject, @unchecked Sendable {
 @objc public nonisolated protocol SUVersionComparison: NSObjectProtocol {}
 
 public nonisolated final class SUAppcastItem: NSObject, @unchecked Sendable {
+    public var fileURL: URL? { nil }
     public var displayVersionString: String { "" }
     public var versionString: String { "" }
 }
@@ -456,9 +477,15 @@ public nonisolated final class SUStandardVersionComparator: NSObject, @unchecked
 }
 
 public final class SUAppcast: NSObject {}
+public enum SPUUserUpdateChoice: Int, Sendable { case skip, install, dismiss }
+public final class SPUUserUpdateState: NSObject {
+    public enum Stage: Int, Sendable { case notDownloaded, downloaded, installing }
+    public var stage: Stage { .notDownloaded }
+}
 public enum SPUUpdateCheck: Int, Sendable { case updates, updatesInBackground, updateInformation }
 
 public final class SPUUpdater: NSObject {
+    public func checkForUpdates(forVersion _: String) throws {}
     @objc public dynamic var automaticallyChecksForUpdates = false
     @objc public dynamic var automaticallyDownloadsUpdates = false
     @objc public dynamic var allowsAutomaticUpdates = false

@@ -12,6 +12,9 @@ struct NativeTimelineAccessibilityRowState: Equatable {
     let item: NativeMessageTimelineItem
     let translation: MessageTranslationEntry?
     let isTranslationEnabled: Bool
+    let threadPreview: Message?
+    /// Upload progress leaves the item unchanged, but ends the files' cancel.
+    let isUploadCancellable: Bool
 }
 
 nonisolated enum TimelineAccessibilityWorkPolicy {
@@ -45,7 +48,8 @@ struct ComponentMediaA11yInput {
     let message: Message
     let rowIndex: Int
     let parent: NSAccessibilityElement
-    let usesFileActionLabels: Bool
+    /// The file a file component's element downloads; nil for media.
+    let file: Attachment?
     let viewerPresentation: NativeTimelineMediaViewerPresentation?
 }
 
@@ -115,9 +119,13 @@ extension NativeTimelineCanvasView {
                        }
                    )
         {
-            let editingChild = additionalChildren.remove(at: hostIndex)
+            // The editor, then its Cancel and Save, read right after the row.
+            var editingChildren = [additionalChildren.remove(at: hostIndex)]
+            if let controlsIndex = additionalChildren.firstIndex(where: { ($0 as? NSView) === editing.controlsHost }) {
+                editingChildren.append(additionalChildren.remove(at: controlsIndex))
+            }
             orderedChildren.insert(
-                editingChild,
+                contentsOf: editingChildren,
                 at: min(insertionIndex, orderedChildren.endIndex)
             )
         }
@@ -174,14 +182,19 @@ extension NativeTimelineCanvasView {
                 translation: item.messageRow.flatMap {
                     model?.messageTranslationPresentation(for: $0.message)
                 },
-                isTranslationEnabled: model?.translation.settings.isEnabled == true
+                isTranslationEnabled: model?.translation.settings.isEnabled == true,
+                threadPreview: item.messageRow?.message.thread.flatMap { model?.threadPreviewMessages[$0.id] },
+                isUploadCancellable: layouts[index].uploadRings.contains {
+                    model?.attachmentUploads.isUploading(nonce: item.messageRow?.message.nonce, attachmentID: $0.attachmentID) == true
+                }
             )
             let frame = rowFrame(at: index)
             desired.insert(identifier)
             desiredOrder.append(identifier)
-            // Translation state lives outside the immutable message item.
-            // Refresh children and actions when it changes, even if only
-            // this row's presentation was updated.
+            // Translation state and a thread card's latest-message preview
+            // live outside the immutable message item. Refresh children and
+            // actions when they change, even if only this row's
+            // presentation was updated.
             if accessibilityProxies.item(for: identifier) != state {
                 accessibilityProxies.remove(identifier)
                 let source = accessibilityRow(at: index)
@@ -291,6 +304,12 @@ extension NativeTimelineCanvasView {
         let layout = layouts[index]
         let rowFrame = rowFrame(at: index)
         switch item {
+        case let .suppressedMessages(group):
+            return accessibilityElement(role: .button, label: "\(group.label), \(group.actionTitle)",
+                                        frame: rowFrame, parent: self) { [weak self] in
+                self?.toggleSuppressedGroup(group)
+                return self != nil
+            }
         case let .inboxEvent(event):
             return accessibilityElement(role: .button, label: event.name, frame: rowFrame, parent: self) { [weak self] in
                 self?.model?.inbox.selectedEvent = event
@@ -319,12 +338,11 @@ extension NativeTimelineCanvasView {
             ])
             return element
         case let .beginning(beginning):
-            return accessibilityElement(
-                role: .row,
-                label: "\(beginning.title). \(beginning.description)",
-                identifier: "timeline-beginning-\(beginning.id)",
-                frame: rowFrame,
-                parent: self
+            return accessibilityBeginning(
+                beginning,
+                layout: layout,
+                rowFrame: rowFrame,
+                rowIndex: index
             )
         case let .loader(isLoading, kind):
             let element = accessibilityElement(
@@ -376,6 +394,62 @@ extension NativeTimelineCanvasView {
         }
     }
 
+    private func accessibilityBeginning(
+        _ beginning: NativeTimelineBeginning,
+        layout: NativeTimelineRowLayout,
+        rowFrame: CGRect,
+        rowIndex: Int
+    ) -> NSAccessibilityElement {
+        let revealedTextSpoilerState = textSpoilerRevealState(at: rowIndex)
+        let revealedLocations = revealedTextSpoilerState.locations(in: .beginningDescription)
+        let descriptionBox = layout.beginningLayout?.descriptionBox
+        let descriptionText = descriptionBox.map {
+            TimelineTextAccessibility.text($0.value, revealedLocations: revealedLocations)
+        } ?? beginning.description
+        let rowLabel = descriptionText.isEmpty
+            ? beginning.title
+            : "\(beginning.title). \(descriptionText)"
+        let element = accessibilityElement(
+            role: .row,
+            label: rowLabel,
+            identifier: "timeline-beginning-\(beginning.id)",
+            frame: rowFrame,
+            parent: self
+        )
+        guard let beginningLayout = layout.beginningLayout else {
+            return element
+        }
+        var children: [Any] = []
+        if !beginning.title.isEmpty {
+            children.append(accessibilityElement(
+                role: .staticText,
+                label: beginning.title,
+                frame: accessibilityChildFrame(
+                    beginningLayout.titleFrame,
+                    rowIndex: rowIndex
+                ),
+                parent: element
+            ))
+        }
+        appendTextAccessibility(
+            to: &children,
+            input: NativeTimelineTextAccessibilityInput(
+                value: beginningLayout.descriptionBox.value,
+                framesetter: beginningLayout.descriptionBox.framesetter,
+                drawingFrame: beginningLayout.descriptionFrame,
+                accessibilityFrame: beginningLayout.descriptionFrame,
+                sourceMessage: nil,
+                itemIdentifier: items[rowIndex].identifier,
+                region: .beginningDescription,
+                revealedLocations: revealedLocations,
+                rowIndex: rowIndex,
+                parent: element
+            )
+        )
+        element.setAccessibilityChildren(children)
+        return element
+    }
+
     func accessibilityMessage(
         _ row: MessageRowPresentation,
         isUnreadBoundary: Bool,
@@ -391,11 +465,7 @@ extension NativeTimelineCanvasView {
         let header = makeMessageAccessibilityHeader(for: row, rowFrame: rowFrame)
         let element = header.element
         element.setAccessibilityCustomActions(
-            accessibilityMessageActions(
-                row,
-                rowFrame: rowFrame,
-                rowIndex: rowIndex
-            ).map { action in
+            accessibilityMessageActions(row, rowIndex: rowIndex).map { action in
                 let handler = action.handler
                 action.handler = { [weak self] in
                     guard let self, !self.sendTransitionBlocksInteractions else { return false }
@@ -425,13 +495,6 @@ extension NativeTimelineCanvasView {
                 parent: element
             )
         )
-        guard NativeTimelineAccessibilityPolicy.showsMessageBody(
-            messageID: message.id,
-            editingMessageID: editingMessageID
-        ) else {
-            element.setAccessibilityChildren(children)
-            return element
-        }
         appendMessageBodyAccessibility(
             to: &children,
             message: message,
@@ -487,10 +550,13 @@ extension NativeTimelineCanvasView {
         )
         let generatedLabel = SystemMessagePresentation.label(
             for: message,
-            currentUserID: model?.snapshot?.currentUser.id
+            currentUserID: model?.currentUser?.id,
+            recipient: model?.systemMessageRecipient(for: message)
         )
         let baseLabel = message.type.hasGeneratedContent
             ? "System message, \(generatedLabel)"
+            : message.type == .autoModerationAction
+            ? "AutoMod alert about a message from \(author.displayName)"
             : "Message from \(author.displayName)"
         let press: (@MainActor @Sendable () -> Bool)? =
             if actions?.openMessage != nil {
@@ -505,7 +571,7 @@ extension NativeTimelineCanvasView {
         let element = accessibilityElement(
             role: .row,
             label: ([baseLabel] + metadata).joined(separator: ", "),
-            value: MessageOutboxPresentation.accessibilityStatus(for: message.outboxState),
+            value: MessageOutboxPresentation.accessibilityStatus(for: message),
             help: actions?.openMessage == nil ? nil : "Jump to message",
             identifier: "timeline-message-\(message.id)",
             frame: rowFrame,
@@ -541,7 +607,7 @@ extension NativeTimelineCanvasView {
                 parent: parent
             ))
         }
-        if isUnreadBoundary, let frame = layout.unreadSeparatorFrame {
+        if isUnreadBoundary, let frame = layout.unreadDividerFrame {
             children.append(accessibilityElement(
                 role: .staticText,
                 label: "New messages",
@@ -586,35 +652,9 @@ extension NativeTimelineCanvasView {
         let rowIndex = input.rowIndex
         let parent = input.parent
         if let region = layout.commandInvocationRegion {
-            let invokingUser =
-                message.interactionMetadata?.user?.displayName
-                ?? "Someone"
-            let commandName =
-                message.interactionMetadata?.displayName
-                ?? "command"
-            children.append(accessibilityElement(
-                role: .button,
-                label: "\(invokingUser) used /\(commandName)",
-                help: "Show profile",
-                frame: accessibilityChildFrame(
-                    region.frame,
-                    rowIndex: rowIndex
-                ),
-                parent: parent
-            ) { [weak self] in
-                guard let self,
-                      let user = message.interactionMetadata?.user
-                else { return false }
-                self.showMessageProfile(
-                    for: user,
-                    sourceMessage: message,
-                    anchor: self.accessibilityChildFrame(
-                        region.profileFrame,
-                        rowIndex: rowIndex
-                    )
-                )
-                return true
-            })
+            children.append(contentsOf: commandInvocationAccessibilityElements(
+                region, message: message, rowIndex: rowIndex, parent: parent
+            ) as [Any])
         }
         if !message.type.hasGeneratedContent,
            layout.avatarFrame != nil || layout.authorFrame != nil
@@ -706,7 +746,8 @@ extension NativeTimelineCanvasView {
                 rowIndex: rowIndex,
                 parent: parent
             ))
-        } else if let frame = layout.contentFrame {
+        } else if let frame = layout.contentFrame, message.id != editingMessageID {
+            // While editing, the editor over the text reads it instead.
             let content = accessibilityMessageText(message)
             if !content.isEmpty {
                 children.append(accessibilityElement(
@@ -785,44 +826,117 @@ extension NativeTimelineCanvasView {
                 parent: parent
             )
             let attachmentChildren = layout.attachmentRegions.map { region in
-                let attachment = region.attachment
-                let revealKey =
-                    NativeTimelineComponentRevealKey.attachment(
-                        messageID: message.id,
-                        attachmentID: attachment.id
-                    )
-                let isHiddenSpoiler =
-                    attachment.isSpoiler
-                    && !spoilerRevealStore.isMediaRevealed(revealKey)
-                let contentLabel =
-                    attachment.description
-                    ?? attachment.title
-                    ?? attachment.filename
-                let label = isHiddenSpoiler
-                    ? "Reveal spoiler media"
-                    : contentLabel
-                return accessibilityElement(
-                    role: .button,
-                    label: label,
-                    help: isHiddenSpoiler
-                        ? "Reveals this media without opening it"
-                        : "Open \(contentLabel)",
-                    frame: accessibilityChildFrame(
-                        region.frame,
-                        rowIndex: rowIndex
-                    ),
-                    parent: gallery
-                ) { [weak self] in
-                    self?.activateAttachment(
-                        attachment,
-                        in: message,
-                        rowIndex: rowIndex
-                    ) ?? false
-                }
+                attachmentAccessibilityElement(region, message: message, rowIndex: rowIndex, parent: gallery)
             }
             gallery.setAccessibilityChildren(attachmentChildren)
             children.append(gallery)
         }
+        appendPlayerAccessibility(to: &children, message: message, layout: layout, rowIndex: rowIndex, parent: parent)
+    }
+
+    /// An attachment in a message's media gallery. A file opens in the
+    /// viewer and offers its card's download as a custom action.
+    private func attachmentAccessibilityElement(
+        _ region: NativeTimelineRowLayout.AttachmentRegion,
+        message: Message,
+        rowIndex: Int,
+        parent: Any?
+    ) -> NSAccessibilityElement {
+        let attachment = region.attachment
+        let revealKey =
+            NativeTimelineComponentRevealKey.attachment(
+                messageID: message.id,
+                attachmentID: attachment.id
+            )
+        let isHiddenSpoiler =
+            attachment.isSpoiler
+            && !spoilerRevealStore.isMediaRevealed(revealKey)
+        let contentLabel =
+            attachment.description
+            ?? attachment.title
+            ?? attachment.filename
+        let label = isHiddenSpoiler ? "Reveal spoiler" : contentLabel
+        let element = accessibilityElement(
+            role: .button,
+            label: label,
+            help: isHiddenSpoiler ? "Reveals the spoiler without opening it" : "Open \(contentLabel)",
+            frame: accessibilityChildFrame(
+                region.frame,
+                rowIndex: rowIndex
+            ),
+            parent: parent
+        ) { [weak self] in
+            self?.activateAttachment(
+                attachment,
+                in: message,
+                rowIndex: rowIndex
+            ) ?? false
+        }
+        if !attachment.mediaKind.isVisual, !isHiddenSpoiler, !message.isUnconfirmedLocalSend {
+            element.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: fileCardActionDescription(attachment, name: contentLabel)) { [weak self] in
+                    self?.activateFileCard(attachment)
+                    return self != nil
+                },
+            ])
+        }
+        return element
+    }
+
+    /// Voice message and audio file players outside spoilers.
+    private func appendPlayerAccessibility(
+        to children: inout [Any],
+        message: Message,
+        layout: NativeTimelineRowLayout,
+        rowIndex: Int,
+        parent: NSAccessibilityElement
+    ) {
+        for region in layout.audioPlayers where !isConcealedSpoiler(region.attachment, in: message.id) {
+            children.append(voiceMessageAccessibilityElement(region, rowIndex: rowIndex, parent: parent))
+        }
+    }
+
+    private func voiceMessageAccessibilityElement(
+        _ region: NativeTimelineVoiceMessageRegion,
+        rowIndex: Int,
+        parent: Any?
+    ) -> NSAccessibilityElement {
+        let isAudioFile = region.style == .audioFile
+        let element = accessibilityElement(
+            role: .button,
+            label: isAudioFile
+                ? "Audio file, \(region.attachment.filename)"
+                : "Voice message, \(VoiceMessageDurationFormat.string(region.duration))",
+            help: isAudioFile ? "Plays or pauses the audio file" : "Plays or pauses the voice message",
+            frame: accessibilityChildFrame(region.frame, rowIndex: rowIndex),
+            parent: parent
+        ) { [weak self] in
+            guard let playback = self?.model?.voiceMessagePlayback else { return false }
+            playback.toggle(region.playbackID, source: region.source, duration: region.knownDuration(in: playback))
+            return true
+        }
+        let speed = isAudioFile ? [] : [
+            NSAccessibilityCustomAction(name: "Change Playback Speed") { [weak self] in
+                guard let playback = self?.model?.voiceMessagePlayback else { return false }
+                playback.cycleSpeed()
+                return true
+            },
+        ]
+        element.setAccessibilityCustomActions(speed + [-10.0, 10.0].map { offset in
+            NSAccessibilityCustomAction(name: offset < 0 ? "Skip Back 10 Seconds" : "Skip Forward 10 Seconds") { [weak self] in
+                guard let playback = self?.model?.voiceMessagePlayback else { return false }
+                let duration = playback.duration(of: region.playbackID) ?? region.knownDuration(in: playback) ?? 0
+                guard duration > 0 else { return false }
+                playback.seek(
+                    region.playbackID,
+                    source: region.source,
+                    duration: duration,
+                    fraction: (playback.position(of: region.playbackID) + offset) / duration
+                )
+                return true
+            }
+        })
+        return element
     }
 
     private func appendMessageRichContentAccessibility(
@@ -850,6 +964,7 @@ extension NativeTimelineCanvasView {
             rowIndex: rowIndex,
             parent: parent
         )
+        appendAutoModAlertAccessibility(message: message, to: &children, layout: layout, rowIndex: rowIndex, parent: parent)
         appendComponentAccessibility(
             to: &children,
             message: message,
@@ -875,6 +990,7 @@ extension NativeTimelineCanvasView {
                 role: .button,
                 label: NativeTimelineAccessibilityPresentation
                     .threadLabel(thread),
+                value: threadLastMessageSummary(thread),
                 help: "Open thread",
                 frame: accessibilityChildFrame(frame, rowIndex: rowIndex),
                 parent: parent
@@ -908,13 +1024,15 @@ extension NativeTimelineCanvasView {
                     region.frame,
                     rowIndex: rowIndex
                 ),
-                parent: parent
+                parent: parent,
+                isEnabled: model?.canUpdateReactions(on: message) == true
             ) { [weak self] in
-                self?.actions?.react(reaction.emoji, message)
-                return self != nil
+                guard let self, model?.canUpdateReactions(on: message) == true else { return false }
+                actions?.react(reaction.emoji, message)
+                return true
             })
         }
-        if let frame = layout.addReactionFrame {
+        if let frame = layout.addReactionFrame, model?.canCreateReactions(on: message) == true {
             children.append(accessibilityElement(
                 role: .button,
                 label: "Add reaction",
@@ -922,14 +1040,7 @@ extension NativeTimelineCanvasView {
                 parent: parent
             ) { [weak self] in
                 guard let self else { return false }
-                self.showReactionPicker(
-                    for: message,
-                    anchor: frame.offsetBy(
-                        dx: 0,
-                        dy: self.displayedRowOrigin(at: rowIndex)
-                    ),
-                    preferredEdge: .maxX
-                )
+                self.showReactionPicker(forMessageRow: message)
                 return true
             })
         }
@@ -960,7 +1071,7 @@ extension NativeTimelineCanvasView {
         if let frame = layout.failedFrame {
             children.append(accessibilityElement(
                 role: .staticText,
-                label: "Failed",
+                label: MessageOutboxPresentation.accessibilityStatus(for: message),
                 frame: accessibilityChildFrame(
                     frame,
                     rowIndex: rowIndex
@@ -968,6 +1079,18 @@ extension NativeTimelineCanvasView {
                 parent: parent
             ))
         }
+        if let frame = layout.failedRetryFrame {
+            children.append(accessibilityElement(
+                role: .button,
+                label: MessageOutboxPresentation.retryTitle,
+                frame: accessibilityChildFrame(frame, rowIndex: rowIndex),
+                parent: parent
+            ) { [weak self] in
+                self?.actions?.retry(message)
+                return true
+            })
+        }
+        appendUploadAccessibility(to: &children, message: message, layout: layout, rowIndex: rowIndex, parent: parent)
     }
 
     func appendTextAccessibility(
@@ -1001,7 +1124,6 @@ extension NativeTimelineCanvasView {
         to children: inout [Any],
         input: NativeTimelineTextAccessibilityInput
     ) {
-        guard let sourceMessage = input.sourceMessage else { return }
         // A hidden spoiler exposes only its reveal button, not its links.
         let hiddenSpoilerRanges = NativeTimelineTextSpoilers.hiddenRanges(
             in: input.value,
@@ -1040,18 +1162,21 @@ extension NativeTimelineCanvasView {
                     parent: input.parent
                 ) { [weak self] in
                     guard let self else { return false }
-                    return MessageLinkActivator.activate(
-                        url,
-                        model: self.model,
-                        sourceMessage: sourceMessage,
-                        displayedText: linkLabel,
-                        presentSystemProfile: { [weak self] user in
+                    let presentSystemProfile: ((User) -> Void)? = input.sourceMessage.map { sourceMessage in
+                        { [weak self] user in
                             self?.showMessageProfile(
                                 for: user,
                                 sourceMessage: sourceMessage,
                                 anchor: anchor
                             )
                         }
+                    }
+                    return MessageLinkActivator.activate(
+                        url,
+                        model: self.model,
+                        sourceMessage: input.sourceMessage,
+                        displayedText: linkLabel,
+                        presentSystemProfile: presentSystemProfile
                     )
                 })
             }
@@ -1126,11 +1251,30 @@ extension NativeTimelineCanvasView {
         rowIndex: Int,
         parent: NSAccessibilityElement
     ) {
+        let concealedEmbeds = NativeTimelineSpoilerConcealmentPolicy.concealedEmbeds(
+            in: message, store: spoilerRevealStore
+        )
+        var coveredKeys = Set<NativeTimelineComponentRevealKey>()
         for region in layout.embedRegions {
+            if let key = concealedEmbeds[region.embedID] {
+                // A multi-image post's card spans its grid and reveals it whole.
+                guard coveredKeys.insert(key).inserted else { continue }
+                children.append(accessibilityElement(
+                    role: .button,
+                    label: "Reveal spoiler",
+                    help: "Reveals the spoiler without opening it",
+                    frame: accessibilityChildFrame(region.frame, rowIndex: rowIndex),
+                    parent: parent
+                ) { [weak self] in
+                    self?.reveal(key, rowIndex: rowIndex)
+                    return self != nil
+                })
+                continue
+            }
             let embed = message.embeds.first { $0.id == region.embedID }
             let group = accessibilityElement(
                 role: .group,
-                label: embed?.title ?? "Embed",
+                label: embed?.title ?? (region.kind == .unframed ? "Caught message" : "Embed"),
                 frame: accessibilityChildFrame(
                     region.frame,
                     rowIndex: rowIndex
@@ -1301,7 +1445,7 @@ extension NativeTimelineCanvasView {
                 children.append(accessibilityElement(
                     role: .button,
                     label: "Reveal spoiler",
-                    help: "Reveals this content without activating it",
+                    help: "Reveals the spoiler without opening it",
                     frame: accessibilityChildFrame(
                         hiddenContainer.frame,
                         rowIndex: rowIndex
@@ -1440,7 +1584,7 @@ extension NativeTimelineCanvasView {
                     message: message,
                     rowIndex: rowIndex,
                     parent: parent,
-                    usesFileActionLabels: false,
+                    file: nil,
                     viewerPresentation:
                         NativeTimelineMediaViewerPlan.components(
                             in: message,
@@ -1471,7 +1615,7 @@ extension NativeTimelineCanvasView {
                     message: message,
                     rowIndex: rowIndex,
                     parent: parent,
-                    usesFileActionLabels: false,
+                    file: nil,
                     viewerPresentation:
                         NativeTimelineMediaViewerPlan.components(
                             in: message,
@@ -1494,7 +1638,7 @@ extension NativeTimelineCanvasView {
                 hiddenContainerFrames: hiddenContainerFrames
             ) {
                 appendComponentMediaAccessibility(to: &children, input: .init(
-                    label: region.title,
+                    label: region.attachment.filename,
                     frame: region.frame,
                     componentID: region.componentID,
                     openURL: region.openURL,
@@ -1502,7 +1646,7 @@ extension NativeTimelineCanvasView {
                     message: message,
                     rowIndex: rowIndex,
                     parent: parent,
-                    usesFileActionLabels: true,
+                    file: region.attachment,
                     viewerPresentation:
                         NativeTimelineMediaViewerPlan.components(
                             in: message,

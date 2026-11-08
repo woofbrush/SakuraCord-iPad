@@ -26,6 +26,13 @@ connection owns call media; each selected screen stream has a separate Voice
 allocation. A stream stop must not leave the enclosing call. Match voice-server,
 state and stream updates to the owning account/session before installing them.
 
+Guild voice states from READY_SUPPLEMENTAL `merged_voice_states`, lazy guild
+snapshots and `VOICE_STATE_UPDATE` are tracked for every guild. A guild
+`VOICE_STATE_UPDATE` carries the participant's documented `member`; it is
+admitted to the member cache only when that member is absent, without publishing
+a member-list change. The server rail's hover card reads only cached members and
+never sends a Gateway member request.
+
 Negotiate transport, codecs and DAVE through MediaPipeline. UDP discovery and
 provisional connection setup are bounded and clean up on failure; they cannot
 leave an indefinite connecting state. Voice timeout `4009` identifies again.
@@ -33,6 +40,20 @@ Invalid/displaced or server-directed sessions (`4006`, `4014`, `4021`, `4022`)
 tear down local media without publishing a main-Gateway leave that could disconnect
 another client now owning the account's voice session. Other transient closures
 use bounded resume. Device changes preserve the active session where possible.
+
+## DAVE group identity and recovery
+
+The MLS group ID is the voice channel ID, or the stream's RTC channel ID for
+screen sharing. It is not the guild or RTC server ID. This matches production web
+build `634304` (`web.843cc7edc28c426c.js`, checked 9 October 2026):
+`trueChannelId` is passed to `prepareSecureFramesEpoch` and then `mlsSession.Init`.
+Pinned Paicord and Swiftcord v1 have no DAVE implementation to corroborate.
+
+Invalid commits or welcomes regenerate the MLS group and key package and discard
+pending transitions, following the [DAVE recovery protocol](https://github.com/discord/dave-protocol/blob/main/protocol.md).
+A fresh Voice Identify also discards the old participant allowlist and encryption
+state; Resume retains them. Reinstalling the current epoch/user ratchet preserves
+its sender nonce sequence and receiver replay window.
 
 ## Private calls
 

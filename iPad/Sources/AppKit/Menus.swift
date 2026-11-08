@@ -20,6 +20,7 @@ public final class NSMenuItem: NSObject {
     public var action: Selector?
     public weak var target: AnyObject?
     public var keyEquivalent: String
+    public var identifier: NSUserInterfaceItemIdentifier?
     public var keyEquivalentModifierMask: NSEvent.ModifierFlags = .command
     public var representedObject: Any?
     public var submenu: NSMenu?
@@ -96,6 +97,7 @@ public final class NSMenu: NSObject {
     public var autoenablesItems = true
     public weak var delegate: NSMenuDelegate?
     public var minimumWidth: CGFloat = 0
+    public var size: CGSize { CGSize(width: max(minimumWidth, 240), height: CGFloat(items.count) * 44) }
     public var font: UIFont?
     public var showsStateColumn = true
     public var numberOfItems: Int { items.count }

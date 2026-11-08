@@ -1,35 +1,71 @@
 import SakuraCordModels
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ComposerAttachmentTray: View {
-    static var thumbnailCornerRadius: CGFloat { InterfaceScale.metric(16) }
+    static var cornerRadius: CGFloat { InterfaceScale.metric(12) }
+    static var tileSize: CGFloat { InterfaceScale.metric(132) }
+    /// The upload ring shrinks with the tile and grows back to the
+    /// timeline's size as it flies into the message.
+    static let ringScale: CGFloat = 0.75
 
-    @AppStorage(PrivacySafetySettingsStore.anonymiseFileNamesKey) private var anonymisesFileNames = false
+    @AppStorage(PrivacySafetySettingsStore.anonymiseFileNamesKey, store: PRBuildProfile.defaults) private var anonymisesFileNames = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attachments: [ForumPostAttachment]
+    /// Files still being checked; they show at once but cannot be sent yet.
+    var checkingIDs: Set<UUID> = []
+    let uploads: AttachmentUploadProgressStore
     var sendTransitionAnchor: ComposerSendTransitionAnchor?
+    /// The tile the media viewer is zoomed out of, which hides meanwhile.
+    /// Read here rather than by the composer, which would otherwise redraw
+    /// as the viewer opens.
+    var mediaViewerSourceID: () -> String? = { nil }
+    var scrolled: () -> Void = {}
     let open: (UUID) -> Void
     let toggleSpoiler: (UUID) -> Void
     let update: (ForumPostAttachment) -> Void
     let remove: (UUID) -> Void
-    @State private var hoveredID: UUID?
     @State private var editingTarget: ComposerAttachmentEditorTarget?
 
-    private let tileSize: CGFloat = InterfaceScale.metric(230)
-    private let filenameRowHeight: CGFloat = InterfaceScale.metric(38)
-
     var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: InterfaceScale.metric(12)) {
-                ForEach(attachments) { attachment in
-                    attachmentTile(attachment)
+        let mediaViewerSourceID = mediaViewerSourceID()
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: InterfaceScale.metric(9)) {
+                    ForEach(attachments) { attachment in
+                        ComposerAttachmentTile(
+                            attachment: attachment,
+                            isChecking: checkingIDs.contains(attachment.id),
+                            uploads: uploads,
+                            anonymisesFileNames: anonymisesFileNames,
+                            sendTransitionAnchor: sendTransitionAnchor,
+                            isMediaViewerSource: mediaViewerSourceID == attachment.id.uuidString,
+                            open: open,
+                            toggleSpoiler: toggleSpoiler,
+                            toggleFilenamePrivacy: toggleFilenamePrivacy,
+                            edit: { editingTarget = ComposerAttachmentEditorTarget(id: $0) },
+                            remove: remove
+                        )
                         .id(attachment.id)
+                        .transition(reduceMotion ? .opacity : Self.tileTransition)
+                    }
+                }
+                .padding(InterfaceScale.metric(10))
+                // Tiles settle on their own spring inside the composer's
+                // resize, which carries the tray itself.
+                .animation(reduceMotion ? .smooth(duration: 0.2) : ComposerResizeMotion.tile, value: attachments.map(\.id))
+            }
+            .scrollIndicators(.hidden)
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.x }, action: { _, _ in scrolled() })
+            .onChange(of: attachments.map(\.id)) { previous, current in
+                // Bring a newly added file into view as it arrives.
+                guard let added = current.last(where: { !previous.contains($0) }) else { return }
+                withAnimation(reduceMotion ? nil : ComposerResizeMotion.tile) {
+                    proxy.scrollTo(added, anchor: .trailing)
                 }
             }
-            .padding(.horizontal, InterfaceScale.metric(14))
-            .padding(.vertical, InterfaceScale.metric(14))
         }
-        .scrollIndicators(.hidden)
-        .frame(height: tileSize + 28)
+        .frame(height: Self.tileSize + InterfaceScale.metric(20))
         .accessibilityLabel("Message attachments")
         .onChange(of: anonymisesFileNames) { _, enabled in
             for var attachment in attachments {
@@ -37,9 +73,9 @@ struct ComposerAttachmentTray: View {
                 update(attachment)
             }
         }
-        .sheet(item: $editingTarget) { target in
+        .windowModal(item: $editingTarget, cornerRadius: InterfaceScale.metric(32), cornerStyle: .circular) { target in
             if let attachment = attachments.first(where: { $0.id == target.id }) {
-                ForumAttachmentEditor(
+                AttachmentEditor(
                     attachment: attachment,
                     cancel: { editingTarget = nil },
                     save: {
@@ -51,39 +87,71 @@ struct ComposerAttachmentTray: View {
         }
     }
 
-    private func attachmentTile(_ attachment: ForumPostAttachment) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            attachmentPreview(attachment)
-            Text(attachment.filename)
-                .font(.interface(.callout).weight(.medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.horizontal, InterfaceScale.metric(14))
-                .frame(
-                    width: tileSize,
-                    height: filenameRowHeight,
-                    alignment: .leading
-                )
-        }
-            .frame(width: tileSize, height: tileSize, alignment: .topLeading)
-            .background(.primary.opacity(0.035))
-            .clipShape(ConcentricRectangle(cornerRadius: InterfaceScale.metric(16), style: .continuous))
-            .overlay {
-                ConcentricRectangle(cornerRadius: InterfaceScale.metric(16), style: .continuous)
-                    .stroke(.separator, lineWidth: 1)
+    /// A file drops into place and pops back out when removed.
+    private static var tileTransition: AnyTransition {
+        .asymmetric(
+            insertion: .scale(scale: 0.82, anchor: .bottom)
+                .combined(with: .opacity)
+                .combined(with: .offset(y: InterfaceScale.metric(8))),
+            removal: .scale(scale: 0.86).combined(with: .opacity)
+        )
+    }
+
+    private func toggleFilenamePrivacy(_ attachment: ForumPostAttachment) {
+        var updated = attachment
+        updated.setFilenameAnonymised(!attachment.isFilenameAnonymised)
+        update(updated)
+    }
+}
+
+private struct ComposerAttachmentTile: View {
+    let attachment: ForumPostAttachment
+    let isChecking: Bool
+    let uploads: AttachmentUploadProgressStore
+    let anonymisesFileNames: Bool
+    let sendTransitionAnchor: ComposerSendTransitionAnchor?
+    let isMediaViewerSource: Bool
+    let open: (UUID) -> Void
+    let toggleSpoiler: (UUID) -> Void
+    let toggleFilenamePrivacy: (ForumPostAttachment) -> Void
+    let edit: (UUID) -> Void
+    let remove: (UUID) -> Void
+    @State private var isHovered = false
+    @State private var uploadFraction: Double?
+    @State private var thumbnail: NSImage?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var tileSize: CGFloat { ComposerAttachmentTray.tileSize }
+    /// The name and action pills' height, so they read as one set.
+    private var controlDiameter: CGFloat { InterfaceScale.metric(18) }
+    private var pillInset: CGFloat { InterfaceScale.metric(5) }
+    private var shape: ConcentricRectangle {
+        ConcentricRectangle(cornerRadius: ComposerAttachmentTray.cornerRadius, style: .continuous)
+    }
+
+    var body: some View {
+        tile
+            .background {
+                ComposerSendTransitionAttachmentReader(anchor: sendTransitionAnchor, id: attachment.id, thumbnail: thumbnail)
             }
-            .contentShape(ConcentricRectangle(cornerRadius: InterfaceScale.metric(14), style: .continuous))
+            .animation(.smooth(duration: 0.25), value: isChecking)
+            .animation(.smooth(duration: 0.25), value: uploadFraction == nil)
+            .contentShape(shape)
+            .onTapGesture { open(attachment.id) }
+            // A spoiler takes the pointing hand, as it does in the timeline.
+            .pointerStyle(attachment.isSpoiler ? .link : nil)
             .onModalHover { hovering in
-                hoveredID =
-                    hovering
-                        ? attachment.id
-                        : (hoveredID == attachment.id ? nil : hoveredID)
+                withAnimation(ComposerResizeMotion.hover) { isHovered = hovering }
             }
-            .help(attachment.filename)
+            .onAppear { uploadFraction = uploads.preuploadFraction(attachment.id) }
+            .onReceive(NotificationCenter.default.publisher(for: AttachmentUploadProgressStore.didChange, object: uploads)) {
+                guard $0.userInfo?[AttachmentUploadProgressStore.attachmentIDKey] as? UUID == attachment.id else { return }
+                uploadFraction = uploads.preuploadFraction(attachment.id)
+            }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(attachment.filename)
+            .accessibilityValue(accessibilityStatus)
             .accessibilityAction(named: "Open attachment") {
-                guard attachmentMediaKind(attachment).isViewableImage else { return }
                 open(attachment.id)
             }
             .accessibilityAction(
@@ -99,80 +167,153 @@ struct ComposerAttachmentTray: View {
                 }
             }
             .accessibilityAction(named: "Edit attachment") {
-                editingTarget = ComposerAttachmentEditorTarget(id: attachment.id)
+                edit(attachment.id)
             }
             .accessibilityAction(named: "Delete attachment") {
                 remove(attachment.id)
             }
     }
 
-    private func attachmentPreview(
-        _ attachment: ForumPostAttachment
-    ) -> some View {
+    private var tile: some View {
         ZStack {
-            LocalAttachmentThumbnail(
-                url: attachment.url,
-                maximumPixelDimension: 480,
-                preservesImageAspectRatio: true,
-                imageCornerRadius: Self.thumbnailCornerRadius,
-                onImageLoaded: { [sendTransitionAnchor] image in
-                    sendTransitionAnchor?.recordAttachmentThumbnail(image, for: attachment.id)
-                }
-            )
-            .background {
-                ComposerSendTransitionAttachmentReader(anchor: sendTransitionAnchor, id: attachment.id)
-            }
-            .padding(.horizontal, InterfaceScale.metric(10))
-            .padding(.vertical, InterfaceScale.metric(8))
-
-            if attachment.isSpoiler {
-                Rectangle()
-                    .fill(.black.opacity(0.58))
-                VStack(spacing: InterfaceScale.metric(5)) {
-                    Image(systemName: "eye.slash")
-                    Text("SPOILER")
-                        .font(.interface(.caption2).weight(.bold))
-                }
-                .foregroundStyle(.white)
+            face
+                .spoilerCover(
+                    attachment.isSpoiler,
+                    pillScale: NativeTimelineSpoilerAppearance.pillScale(forTileWidth: tileSize),
+                    isHovered: isHovered
+                )
+            if isChecking || uploadFraction != nil {
+                uploadCover
             }
         }
-        .frame(width: tileSize, height: tileSize - filenameRowHeight)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard attachmentMediaKind(attachment).isViewableImage else { return }
-            open(attachment.id)
+        .frame(width: tileSize, height: tileSize)
+        .clipShape(shape)
+        .overlay {
+            shape.stroke(.primary.opacity(isHovered ? 0.16 : 0.08), lineWidth: 1)
+        }
+        // The name, an image's shade and the actions arrive and leave
+        // together. A file's flat face needs no shade, which would only
+        // muddy its pale surface in Light.
+        .overlay(alignment: .bottom) {
+            if isHovered, attachment.isVisualMedia {
+                Self.scrim
+                    .clipShape(shape)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if isHovered {
+                filenamePill
+                    .padding(pillInset)
+                    .transition(hoverPillTransition(anchor: .bottomLeading))
+            }
         }
         .overlay(alignment: .topTrailing) {
-            if hoveredID == attachment.id {
-                attachmentActions(attachment)
-                    .padding(InterfaceScale.metric(7))
+            if isHovered {
+                actions
+                    .padding(pillInset)
+                    .transition(hoverPillTransition(anchor: .topTrailing))
             }
+        }
+        .opacity(isMediaViewerSource ? 0 : 1)
+    }
+
+    /// Images and videos fill the tile; other files show their type.
+    @ViewBuilder private var face: some View {
+        if attachment.isVisualMedia {
+            LocalAttachmentThumbnail(
+                url: attachment.url,
+                maximumPixelDimension: 720,
+                onImageLoaded: { thumbnail = $0 }
+            )
+        } else {
+            // The name capsule shows the type on hover, over where the
+            // label sits.
+            ComposerAttachmentFileFace(url: attachment.url, hidesLabel: isHovered)
         }
     }
 
-    private func attachmentActions(
-        _ attachment: ForumPostAttachment
-    ) -> some View {
+    /// Dims the file while it is checked or uploaded, with its progress.
+    private var uploadCover: some View {
+        ZStack {
+            Rectangle()
+                .fill(.black.opacity(AttachmentUploadRing.dimOpacity))
+            if let uploadFraction {
+                AttachmentUploadRingView(fraction: uploadFraction)
+                    .scaleEffect(ComposerAttachmentTray.ringScale)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .environment(\.colorScheme, .dark)
+            }
+        }
+        .transition(.opacity)
+    }
+
+    /// The name in a pill like the actions', so they read as one set.
+    private var filenamePill: some View {
+        HoverActionPill(spacing: 0, padding: 2) {
+            Text(attachment.filename)
+                .font(.interface(.caption).weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, InterfaceScale.metric(5))
+                .frame(height: controlDiameter)
+        }
+        .frame(maxWidth: tileSize - 2 * pillInset, alignment: .leading)
+        .allowsHitTesting(false)
+    }
+
+    private func hoverPillTransition(anchor: UnitPoint) -> AnyTransition {
+        reduceMotion ? .opacity : .scale(scale: 0.7, anchor: anchor).combined(with: .opacity)
+    }
+
+    /// A soft shade under the name over an image. Its eased stops leave no
+    /// visible edge where it starts.
+    private static var scrim: some View {
+        LinearGradient(stops: scrimStops, startPoint: .top, endPoint: .bottom)
+            .frame(height: ComposerAttachmentTray.tileSize / 2)
+    }
+
+    private static let scrimStops: [Gradient.Stop] = (0 ... 16).map { step in
+        let location = Double(step) / 16
+        let eased = location * location * (3 - 2 * location)
+        return .init(color: .black.opacity(0.32 * eased), location: location)
+    }
+
+    private var accessibilityStatus: Text {
+        if let uploadFraction {
+            Text("Uploading, \(uploadFraction, format: .percent.precision(.fractionLength(0)))")
+        } else if isChecking {
+            Text("Preparing")
+        } else {
+            Text("")
+        }
+    }
+
+    private var actions: some View {
         HoverActionPill(
             glass: .regular.interactive(),
             spacing: 1,
-            padding: 3
+            padding: 2
         ) {
             HoverActionButton(
                 systemImage: attachment.isSpoiler ? "eye.slash" : "eye",
                 help: attachment.isSpoiler ? "Remove spoiler" : "Mark as spoiler",
                 isSelected: attachment.isSpoiler,
-                diameter: InterfaceScale.metric(22),
+                diameter: controlDiameter,
                 iconFont: .interface(.caption2).weight(.semibold)
             ) {
                 toggleSpoiler(attachment.id)
             }
+            .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
             if anonymisesFileNames {
                 HoverActionButton(
                     systemImage: "shuffle",
                     help: attachment.isFilenameAnonymised ? "Restore file name" : "Randomise file name",
                     isSelected: attachment.isFilenameAnonymised,
-                    diameter: InterfaceScale.metric(22),
+                    diameter: controlDiameter,
                     iconFont: .interface(.caption2).weight(.semibold)
                 ) {
                     toggleFilenamePrivacy(attachment)
@@ -181,41 +322,73 @@ struct ComposerAttachmentTray: View {
             HoverActionButton(
                 systemImage: "pencil",
                 help: "Edit attachment",
-                diameter: InterfaceScale.metric(22),
+                diameter: controlDiameter,
                 iconFont: .interface(.caption2).weight(.semibold)
             ) {
-                editingTarget = ComposerAttachmentEditorTarget(id: attachment.id)
+                edit(attachment.id)
             }
             HoverActionButton(
                 systemImage: "trash",
                 help: "Delete attachment",
                 role: .destructive,
-                diameter: InterfaceScale.metric(22),
+                diameter: controlDiameter,
                 iconFont: .interface(.caption2).weight(.semibold)
             ) {
                 remove(attachment.id)
             }
         }
     }
+}
 
-    private func toggleFilenamePrivacy(_ attachment: ForumPostAttachment) {
-        var updated = attachment
-        updated.setFilenameAnonymised(!attachment.isFilenameAnonymised)
-        update(updated)
+/// A staged file that is not an image or video: its Finder icon over its
+/// type, filling the tile. It also renders the file's flight to the timeline.
+struct ComposerAttachmentFileFace: View {
+    let url: URL
+    /// A sent tile's flying copy draws the icon and surface itself, so its
+    /// face is only the type label.
+    var isLabelOnly = false
+    var hidesLabel = false
+
+    private static var iconSide: CGFloat { InterfaceScale.metric(72) }
+    private static var labelHeight: CGFloat { InterfaceScale.metric(15) }
+    private static var spacing: CGFloat { InterfaceScale.metric(4) }
+    static let surfaceOpacity = 0.06
+
+    static func icon(for url: URL) -> NSImage {
+        NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .data)
     }
 
-    private func attachmentMediaKind(
-        _ attachment: ForumPostAttachment
-    ) -> AttachmentMediaKind {
-        OptimisticAttachmentPresentation.attachment(
-            for: attachment.url,
-            index: 0
-        ).mediaKind
+    /// Where the icon sits in a tile, from the tile's top.
+    static func iconFrame(in size: CGSize, url: URL) -> CGRect {
+        let height = iconSide + (url.pathExtension.isEmpty ? 0 : spacing + labelHeight)
+        return CGRect(x: (size.width - iconSide) / 2, y: (size.height - height) / 2, width: iconSide, height: iconSide)
+    }
+
+    var body: some View {
+        VStack(spacing: Self.spacing) {
+            Image(nsImage: Self.icon(for: url))
+                .resizable()
+                .scaledToFit()
+                .frame(width: Self.iconSide, height: Self.iconSide)
+                .opacity(isLabelOnly ? 0 : 1)
+            if !url.pathExtension.isEmpty {
+                Text(url.pathExtension.uppercased())
+                    .font(.interface(.caption).weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(height: Self.labelHeight)
+                    .opacity(hidesLabel ? 0 : 1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.primary.opacity(isLabelOnly ? 0 : Self.surfaceOpacity))
     }
 }
 
-private extension AttachmentMediaKind {
-    var isViewableImage: Bool {
-        self == .image || self == .animatedImage
+extension ForumPostAttachment {
+    /// Images and videos, which fill their tile and fly as their thumbnail.
+    var isVisualMedia: Bool {
+        let type = UTType(filenameExtension: url.pathExtension)
+        return type?.conforms(to: .image) == true || type?.conforms(to: .movie) == true
     }
 }

@@ -247,6 +247,7 @@ public nonisolated enum NSViewLayerContentsRedrawPolicy: Sendable {
 public nonisolated struct NSAlignmentOptions: OptionSet, Sendable {
     public let rawValue: UInt
     public init(rawValue: UInt) { self.rawValue = rawValue }
+    public static let alignAllEdgesNearest = NSAlignmentOptions(rawValue: 1)
 }
 
 public extension UIView.AutoresizingMask {
@@ -595,10 +596,31 @@ extension UIApplication {
     private var keyWindowForMonitors: UIWindow? { NSApplication.shared.keyWindow }
 }
 
+/// iPadOS has no hover tool tips on arbitrary view regions.
+public protocol NSViewToolTipOwner: AnyObject {}
+
+public extension UIView {
+    typealias ToolTipTag = Int
+
+    @discardableResult
+    func addToolTip(_: CGRect, owner _: Any, userData _: UnsafeMutableRawPointer?) -> ToolTipTag { 0 }
+    func removeAllToolTips() {}
+    /// UIKit views and their layers share one coordinate space.
+    func convertToLayer(_ rect: CGRect) -> CGRect { rect }
+    func convertFromLayer(_ rect: CGRect) -> CGRect { rect }
+}
+
 extension UIWindow {
+    public var colorSpace: NSColorSpace? { nil }
+    public func setFrame(_: CGRect, display _: Bool) {}
+    public func disableCursorRects() {}
+    public func enableCursorRects() {}
+
     /// Window-space centre of the toolbar row. The system places that row differently
     /// in a window and in full screen, so the toolbar search field measures it.
     public nonisolated(unsafe) static var ak_toolbarCenterY: CGFloat = 27
+    /// Where content that scrolls beneath the toolbar comes to rest.
+    public nonisolated(unsafe) static var ak_toolbarBottomY: CGFloat = 58
     public static let ak_safeAreaDidChange = Notification.Name("AKWindowSafeAreaDidChange")
 
     @objc func ak_swizzled_safeAreaInsetsDidChange() {

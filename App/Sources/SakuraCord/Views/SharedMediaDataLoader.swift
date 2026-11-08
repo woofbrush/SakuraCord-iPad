@@ -96,7 +96,7 @@ actor SharedMediaDataLoader {
     private var activeRemoteLoads: [URL: ActiveRemoteLoad] = [:]
 
     init() {
-        let configuredLimit = (UserDefaults.standard.object(
+        let configuredLimit = (PRBuildProfile.defaults.object(
             forKey: "mediaCacheLimit"
         ) as? NSNumber)?.int64Value ?? Self.defaultRemoteDiskCostLimit
         remoteDiskCache = try? MediaCache(
@@ -185,6 +185,28 @@ actor SharedMediaDataLoader {
         }
         try Task.checkCancellation()
         return data
+    }
+
+    /// A remote item's file if the disk cache already holds it.
+    func storedFile(for url: URL) async -> URL? {
+        try? await remoteDiskCache?.fileURL(for: url)
+    }
+
+    /// A remote item's file in the disk cache, fetched first if needed, for
+    /// readers such as audio players that open files. Nil when the disk
+    /// cache is unavailable or won't hold the item.
+    func cachedFile(
+        for url: URL,
+        priority: MediaLoadPriority = .visible
+    ) async throws -> URL? {
+        precondition(!url.isFileURL)
+        guard let remoteDiskCache else { return nil }
+        if let file = await storedFile(for: url) { return file }
+        let data = try await data(for: url, priority: priority)
+        // The load stores into the disk cache in the background; store now so
+        // the file exists when this returns.
+        try await remoteDiskCache.insert(data, for: url)
+        return try await remoteDiskCache.fileURL(for: url)
     }
 
     func copyRemoteMedia(

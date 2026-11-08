@@ -20,6 +20,7 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
     public var scrollerStyle: NSScrollerStyle = .overlay
     public var usesPredominantAxisScrolling = true
     public var automaticallyAdjustsContentInsets = false
+    public var scrollerInsets = UIEdgeInsets.zero
     public var contentInsets: UIEdgeInsets {
         get { contentInset }
         set { contentInset = newValue }
@@ -54,11 +55,12 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
     public required init?(coder: NSCoder) { super.init(coder: coder) }
 
     public func reflectScrolledClipView(_: NSClipView) { syncContentSize() }
-    public func tile() { setNeedsLayout() }
+    open func tile() {}
     public func flashScrollers() { flashScrollIndicators() }
 
     override open func layoutSubviews() {
         super.layoutSubviews()
+        tile()
         syncContentSize()
     }
 

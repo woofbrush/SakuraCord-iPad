@@ -2,6 +2,17 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+# The reaction storm scenes are the live timeline benchmark carrying only
+# reaction traffic, still or scrolling.
+LIVE_TIMELINE_ARGS=()
+case "$MODE" in
+  --offline-chat-reaction-storm-autoscroll) LIVE_TIMELINE_ARGS=(--offline-chat-performance-live-reactions-only) ;;
+  --offline-chat-reaction-storm-idle)
+    LIVE_TIMELINE_ARGS=(--offline-chat-performance-live-reactions-only --offline-chat-performance-idle) ;;
+esac
+if [[ ${#LIVE_TIMELINE_ARGS[@]} -gt 0 ]]; then
+  MODE=--offline-chat-performance-live-autoscroll
+fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=runtime.sh
 source "$ROOT_DIR/script/runtime.sh"
@@ -11,23 +22,16 @@ source "$ROOT_DIR/script/release_metadata.sh"
 source "$ROOT_DIR/script/debug_credentials_config.sh"
 
 case "$MODE" in
-  package|package-release|run|run-release|--offline|--offline-sign-in|--offline-long-server-list|--offline-forum-performance|--offline-chat-performance|--offline-chat-performance-autoscroll|--offline-chat-performance-live-autoscroll|--offline-chat-media-performance-autoscroll|--offline-pins-performance-autoscroll|--offline-incoming-private-call|--media-viewer-benchmark|--verify|--debug|--logs|--telemetry) ;;
+  package|package-release|run|run-release|--offline|--offline-sign-in|--offline-long-server-list|--offline-forum-performance|--offline-forum-performance-autoscroll|--offline-forum-gallery-resize|--offline-chat-performance|--offline-chat-performance-autoscroll|--offline-chat-performance-live-autoscroll|--offline-chat-media-performance-autoscroll|--offline-chat-voice-performance|--offline-chat-voice-performance-autoscroll|--offline-chat-files-performance|--offline-chat-files-performance-autoscroll|--offline-chat-files-performance-open|--offline-pins-performance-autoscroll|--offline-friends-performance|--offline-server-rail-performance|--offline-unread-churn|--offline-incoming-private-call|--media-viewer-benchmark|--verify|--debug|--logs|--telemetry) ;;
   *)
-    echo "usage: $0 [package|package-release|run|run-release|--offline|--offline-sign-in|--offline-long-server-list|--offline-forum-performance|--offline-chat-performance|--offline-chat-performance-autoscroll|--offline-chat-performance-live-autoscroll|--offline-chat-media-performance-autoscroll|--offline-pins-performance-autoscroll|--offline-incoming-private-call|--media-viewer-benchmark|--verify|--debug|--logs|--telemetry]" >&2
+    echo "usage: $0 [package|package-release|run|run-release|--offline|--offline-sign-in|--offline-long-server-list|--offline-forum-performance|--offline-forum-performance-autoscroll|--offline-forum-gallery-resize|--offline-chat-performance|--offline-chat-performance-autoscroll|--offline-chat-performance-live-autoscroll|--offline-chat-media-performance-autoscroll|--offline-chat-voice-performance|--offline-chat-voice-performance-autoscroll|--offline-chat-files-performance|--offline-chat-files-performance-autoscroll|--offline-chat-files-performance-open|--offline-pins-performance-autoscroll|--offline-friends-performance|--offline-server-rail-performance|--offline-unread-churn|--offline-incoming-private-call|--media-viewer-benchmark|--verify|--debug|--logs|--telemetry]" >&2
     exit 2
     ;;
 esac
 
-APP_NAME="$SAKURACORD_APP_NAME"
-DISPLAY_NAME="$SAKURACORD_DISPLAY_NAME"
 BUNDLE_ID="$SAKURACORD_BUNDLE_ID"
 PACKAGE_DIR="$SAKURACORD_PACKAGE_DIR"
 DIST_DIR="$SAKURACORD_DIST_DIR"
-APP_BUNDLE="$SAKURACORD_APP_BUNDLE"
-CONTENTS="$APP_BUNDLE/Contents"
-MACOS="$CONTENTS/MacOS"
-FRAMEWORKS="$CONTENTS/Frameworks"
-RESOURCES="$CONTENTS/Resources"
 PRODUCT_NAME="$SAKURACORD_PRODUCT_NAME"
 BUNDLE_SHORT_VERSION="$(sakuracord_release_version "$ROOT_DIR")"
 BUNDLE_DISPLAY_VERSION="$(
@@ -77,8 +81,18 @@ if [[ "$MODE" == "package-release" || "$MODE" == "run-release" ]]; then
   BUILD_CONFIGURATION=release
   BUILD_FLAGS=(-c release --disable-index-store)
 fi
+sakuracord_select_app_variant "$BUILD_CONFIGURATION" "$RELEASE_TRACK"
+APP_NAME="$SAKURACORD_APP_NAME"
+DISPLAY_NAME="$SAKURACORD_DISPLAY_NAME"
+APP_BUNDLE="$SAKURACORD_APP_BUNDLE"
+CONTENTS="$APP_BUNDLE/Contents"
+MACOS="$CONTENTS/MacOS"
+FRAMEWORKS="$CONTENTS/Frameworks"
+RESOURCES="$CONTENTS/Resources"
+# Each variant compiles its own Icon Composer document under the shared
+# asset name, so the app keeps native icon appearances.
 APP_ICON_NAME="$SAKURACORD_PRODUCT_NAME"
-APP_ICON_SOURCE="${SAKURACORD_APP_ICON:-SakuraCord.icon}"
+APP_ICON_SOURCE="${SAKURACORD_APP_ICON:-$SAKURACORD_APP_ICON_SOURCE}"
 if [[ "$APP_ICON_SOURCE" = /* ]]; then
   APP_ICON="$APP_ICON_SOURCE"
 else
@@ -176,10 +190,12 @@ xcrun actool \
   --platform macosx \
   --minimum-deployment-target 27.0 \
   --app-icon "$APP_ICON_NAME" \
+  --accent-color AccentColor \
   --output-partial-info-plist "$ICON_PARTIAL_PLIST" \
   --warnings --notices --errors \
   "$ICON_STAGING_DIR/$APP_ICON_NAME.icon" \
-  "$ROOT_DIR/App/Packaging/SettingsDocument.xcassets"
+  "$ROOT_DIR/App/Packaging/SettingsDocument.xcassets" \
+  "$ROOT_DIR/App/Packaging/Appearance.xcassets"
 rm -f "$ICON_PARTIAL_PLIST"
 
 cat >"$CONTENTS/Info.plist" <<PLIST
@@ -190,10 +206,12 @@ cat >"$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>SakuraCordBuildConfiguration</key><string>$BUILD_CONFIGURATION</string>
+  <key>SakuraCordBuildSwitchingProtocol</key><integer>1</integer>
   <key>CFBundleName</key><string>$DISPLAY_NAME</string>
   <key>CFBundleDisplayName</key><string>$DISPLAY_NAME</string>
   <key>CFBundleIconFile</key><string>$APP_ICON_NAME</string>
   <key>CFBundleIconName</key><string>$APP_ICON_NAME</string>
+  <key>NSAccentColorName</key><string>AccentColor</string>
   <key>UTExportedTypeDeclarations</key>
   <array><dict>
     <key>UTTypeIdentifier</key><string>dev.sakuracord.settings</string>
@@ -221,7 +239,7 @@ cat >"$CONTENTS/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>27.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>SakuraCord uses your microphone when you join a voice call.</string>
+  <key>NSMicrophoneUsageDescription</key><string>SakuraCord uses your microphone when you join a voice call or record a voice message.</string>
   <key>NSCameraUsageDescription</key><string>SakuraCord uses your camera when you enable video in a call.</string>
   <key>NSScreenCaptureUsageDescription</key><string>SakuraCord uses screen capture only when you choose a source to share in a voice call.</string>
 </dict>
@@ -253,6 +271,9 @@ if [[ "$UPDATES_ENABLED" == "1" ]]; then
   /usr/libexec/PlistBuddy -c "Add :SUVerifyUpdateBeforeExtraction bool true" "$CONTENTS/Info.plist"
   /usr/libexec/PlistBuddy -c "Add :SURequireSignedFeed bool true" "$CONTENTS/Info.plist"
 fi
+if [[ "${SAKURACORD_PR_BUILD:-0}" == "1" ]]; then
+  python3 "$ROOT_DIR/script/pr_build_archive.py" embed "$APP_BUNDLE"
+fi
 if [[ "$INSECURE_DEBUG_CREDENTIALS" == "1" ]]; then
   /usr/libexec/PlistBuddy -c \
     "Add :SakuraCordInsecureDebugCredentialsEnabled bool true" \
@@ -278,15 +299,31 @@ open_app() {
 open_offline_app() { open_app --args --offline; }
 open_offline_long_server_list() { open_app --args --offline-long-server-list; }
 open_offline_forum_performance() { open_app --args --offline-forum-performance; }
+open_offline_forum_performance_autoscroll() {
+  # `open` does not hand this shell's environment to the app, so forward the
+  # requested result path explicitly.
+  if [[ -n "${SAKURACORD_PERFORMANCE_RESULT_PATH:-}" ]]; then
+    open_app --env "SAKURACORD_PERFORMANCE_RESULT_PATH=$SAKURACORD_PERFORMANCE_RESULT_PATH" \
+      --args --offline-forum-performance-autoscroll
+  else
+    open_app --args --offline-forum-performance-autoscroll
+  fi
+}
 open_offline_chat_performance() { open_app --args --offline-chat-performance; }
 open_offline_chat_performance_autoscroll() {
   open_app --args --offline-chat-performance-autoscroll
 }
 open_offline_chat_performance_live_autoscroll() {
-  open_app --args --offline-chat-performance-live-autoscroll
+  # Forward the result path, which `open` does not pass on by itself.
+  open_app ${SAKURACORD_PERFORMANCE_RESULT_PATH:+--env "SAKURACORD_PERFORMANCE_RESULT_PATH=$SAKURACORD_PERFORMANCE_RESULT_PATH"} \
+    --args --offline-chat-performance-live-autoscroll ${LIVE_TIMELINE_ARGS[@]+"${LIVE_TIMELINE_ARGS[@]}"}
 }
 open_offline_chat_media_performance_autoscroll() {
   open_app --args --offline-chat-media-performance-autoscroll
+}
+open_offline_chat_voice_performance() { open_app --args --offline-chat-voice-performance; }
+open_offline_chat_voice_performance_autoscroll() {
+  open_app --args --offline-chat-voice-performance-autoscroll
 }
 open_offline_pins_performance_autoscroll() {
   open_app --args --offline-pins-performance-autoscroll
@@ -325,11 +362,22 @@ case "$MODE" in
   --offline-sign-in) open_app --args --offline-sign-in ;;
   --offline-long-server-list) open_offline_long_server_list ;;
   --offline-forum-performance) open_offline_forum_performance ;;
+  --offline-forum-performance-autoscroll) open_offline_forum_performance_autoscroll ;;
+  --offline-forum-gallery-resize) open_app --args --offline-forum-gallery-resize ;;
   --offline-chat-performance) open_offline_chat_performance ;;
   --offline-chat-performance-autoscroll) open_offline_chat_performance_autoscroll ;;
   --offline-chat-performance-live-autoscroll) open_offline_chat_performance_live_autoscroll ;;
   --offline-chat-media-performance-autoscroll) open_offline_chat_media_performance_autoscroll ;;
+  --offline-chat-voice-performance) open_offline_chat_voice_performance ;;
+  --offline-chat-voice-performance-autoscroll) open_offline_chat_voice_performance_autoscroll ;;
+  --offline-chat-files-performance|--offline-chat-files-performance-autoscroll|--offline-chat-files-performance-open)
+    # Forward the result path, which `open` does not pass on by itself.
+    open_app ${SAKURACORD_PERFORMANCE_RESULT_PATH:+--env "SAKURACORD_PERFORMANCE_RESULT_PATH=$SAKURACORD_PERFORMANCE_RESULT_PATH"} \
+      --args "$MODE" ;;
   --offline-pins-performance-autoscroll) open_offline_pins_performance_autoscroll ;;
+  --offline-friends-performance) open_app --args --offline-friends-performance ;;
+  --offline-server-rail-performance) open_app --args --offline-server-rail-performance ;;
+  --offline-unread-churn) open_app --args --offline-unread-churn ;;
   --offline-incoming-private-call) open_offline_incoming_private_call ;;
   --media-viewer-benchmark) open_media_viewer_benchmark ;;
 esac

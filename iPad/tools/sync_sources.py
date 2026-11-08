@@ -33,6 +33,14 @@ RULES = [
     (re.compile(rf"\b({NON_OPTIONAL})\?(?=[.\[])"), r"\1"),
     (re.compile(r"\.selectedRange\(\)"), ".nsSelectedRange()"),
     (re.compile(r"\.nextResponder"), ".next"),
+    (re.compile(r"(?<![.\w])nextResponder\b"), "next"),
+    (re.compile(r"\brenderer[.]nsImage\b"), "renderer.uiImage"),
+    (re.compile(r"guard let (\w+) = NSApp else [{] return (?:nil )?[}]"), lambda m: f"let {m.group(1)}: NSApplication = NSApp"),
+    (re.compile(r"[.]identifier[?][.]rawValue\b"), ".identifier"),
+    (re.compile(r"[.]window[?][.]screen[?][.]"), ".window?.screen."),
+    (re.compile(r"(let screen = )(\w+[.]screen)(?=\s*(?:,|else\b|\{))"), lambda m: f"{m.group(1)}Optional({m.group(2)})"),
+    (re.compile(r"override var wantsUpdateLayer"), "var wantsUpdateLayer"),
+    (re.compile(r"(\blet \w+ = )(\w+[.]layer)(?=\s*(?:,|else\b|\{))"), lambda m: f"{m.group(1)}Optional({m.group(2)})"),
     (re.compile(r"(?<![A-Za-z_.])(textContainerInset)(?![A-Za-z_])"), "nsTextContainerInset"),
     (re.compile(r"[.]textContainerInset(?![A-Za-z_])"), ".nsTextContainerInset"),
     (re.compile(r"(?<![A-Za-z_])((?:[a-zA-Z]*[tT]extView|[a-zA-Z]*[Ff]ield|search)[?]?)[.]delegate(?![A-Za-z_])"), lambda m: m.group(1) + ".nsDelegate"),
@@ -41,7 +49,7 @@ RULES = [
     (re.compile(r"[.]withSecurityScope"), ".withoutUI"),
     (re.compile(r"((?:guard|if|,)\s+let )(textStorage|layoutManager|textContainer|layer)(?=\s*(?:,|else\b|\{))"), lambda m: f"{m.group(1)}{m.group(2)} = Optional({m.group(2)})"),
     (re.compile(r"((?:guard|if|,)\s+let \w+ = )(\w*[tT]extView\.(?:textStorage|layoutManager|textContainer))(?=\s*(?:,|else\b|\{|$))", re.M), lambda m: f"{m.group(1)}Optional({m.group(2)})"),
-    (re.compile(r"override (func (?:draggingEntered|draggingUpdated|draggingExited|draggingEnded|prepareForDragOperation|performDragOperation|concludeDragOperation)\()"), lambda m: m.group(1)),
+    (re.compile(r"override (func (?:draggingEntered|draggingUpdated|draggingExited|draggingEnded|prepareForDragOperation|performDragOperation|concludeDragOperation|wantsPeriodicDraggingUpdates|resize\(withOldSuperviewSize oldSize: NSSize\)\s*(?=[{])|__none__)\()"), lambda m: m.group(1)),
     (re.compile(r"(@Entry var \w+: [^=\n]+\?)[ ]*$", re.M), lambda m: m.group(1) + " = nil"),
     (re.compile(r"(?<![.\w])selectedRange\(\)"), "nsSelectedRange()"),
     (re.compile(r"^import PhotosUI$", re.M), "import PhotosUI\nimport _PhotosUI_SwiftUI"),
@@ -64,14 +72,16 @@ RULES = [
     (re.compile(r"[.](accessibility(?:Children|Frame|PerformPress|ActionNames|IsIgnored|VisibleRows|Value|Rows|Role|Label|CustomActions|Parent|Help|Title|Identifier)|isAccessibilityElement)\(\)"), lambda m: f".nsa_{m.group(1)}()"),
     (re.compile(r"(?<![\w.])(accessibility(?:Children|Frame|PerformPress|ActionNames|IsIgnored|VisibleRows|Value|Rows|Role|Label|CustomActions|Parent|Help|Title|Identifier)|isAccessibilityElement)\(\)"), lambda m: f"nsa_{m.group(1)}()"),
     (re.compile(r"override var isOpaque: Bool [{] (\w+) [}]"), lambda m: f"override var isOpaque: Bool {{ get {{ {m.group(1)} }} set {{}} }}"),
-    (re.compile(r"let image = NSImage\(size: ([^\n]+)\)\s*image[.]addRepresentation\(representation\)"), lambda m: f"let image = NSImage(representation: representation, size: {m.group(1)})"),
+    (re.compile(r"let (\w+) = NSImage\(size: ([^\n]+)\)\s*\1[.]addRepresentation\((\w+)\)(?!\s*\1[.]alignmentRect)"), lambda m: f"let {m.group(1)} = NSImage(representation: {m.group(3)}, size: {m.group(2)})"),
+    (re.compile(r"\bNSValue\(size:"), "NSValue(cgSize:"),
+    (re.compile(r"\bNSValue\(point:"), "NSValue(cgPoint:"),
     (re.compile(r"playerLayer[.]autoresizingMask = \[.*?\]", re.S), "_ = ()"),
     (re.compile(r"[.]withSymbolicTraits\("), ".nsWithSymbolicTraits("),
     (re.compile(r"progressIndicator[.]style = "), "progressIndicator.nsStyle = "),
     (re.compile(r"[.]buttonStyle\([.]link\)"), ".buttonStyle(NSLinkButtonStyle())"),
     (re.compile(r"(_ control: )NSControl(, textView:)"), lambda m: f"{m.group(1)}UIControl{m.group(2)}"),
     (re.compile(r"NSTextContainer\(\s*containerSize:"), "NSTextContainer(size:"),
-    (re.compile(r"[.]containerSize\b"), ".size"),
+    (re.compile(r"(?<!Metrics)[.]containerSize\b"), ".size"),
     (re.compile(r"for: [.]windowToolbar"), "for: .navigationBar"),
     (re.compile(r"[.]gesture\(WindowDragGesture\(\)\)"), ""),
     (re.compile(r"let image = NSImage\(size: (NSSize\([^)]*\))\)\s*image[.]lockFocus\(\)"), lambda m: f"let image = NSImage(size: {m.group(1)}, flipped: true) {{ _ in"),
@@ -175,7 +185,7 @@ FILE_RULES = {
         let searchEdge = toolbarSearchFieldMetrics.trailingInset + ChatChromeMetrics.toolbarSearchMaximumFieldWidth
         return ZStack(alignment: .topTrailing) {
             StableAnchoredPopoverPresenter(
-                isPresented: model.inbox.isPresented,
+                isPresented: !usesWorkspaceTitlebar && model.inbox.isPresented,
                 configuration: .toolbarPanel,
                 onDismiss: model.dismissInbox
             ) { InboxPopoverView(model: model) }
@@ -183,7 +193,7 @@ FILE_RULES = {
             .padding(.trailing, searchEdge + 105)
 
             StableAnchoredPopoverPresenter(
-                isPresented: model.pinnedMessages.isPresented,
+                isPresented: !usesWorkspaceTitlebar && model.pinnedMessages.isPresented,
                 configuration: .toolbarPanel,
                 onDismiss: model.dismissPinnedMessages
             ) { PinnedMessagesPopoverView(model: model) }
@@ -198,6 +208,169 @@ FILE_RULES = {
 """ + m.group(1)),
     ],
     # The search field is a UITextField, which macOS's check would miss, sending typing to the composer.
+    # Quick Look's macOS view does not exist on iPadOS; its controller is the equivalent.
+    "MediaViewerFile.swift": [
+        (re.compile(r"^import QuickLookUI$", re.M), "import QuickLook"),
+        (re.compile(r"private struct MediaViewerQuickLook: NSViewRepresentable [{].*?\n[}]\n", re.S),
+         """private struct MediaViewerQuickLook: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator(url: url) }
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        guard context.coordinator.url != url else { return }
+        context.coordinator.url = url
+        controller.reloadData()
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+
+        init(url: URL) { self.url = url }
+
+        func numberOfPreviewItems(in _: QLPreviewController) -> Int { 1 }
+
+        func previewController(_: QLPreviewController, previewItemAt _: Int) -> any QLPreviewItem {
+            url as NSURL
+        }
+    }
+}
+"""),
+    ],
+    "NativeTimelineModels.swift": [
+        (re.compile(r"fullRate\(on screen: NSScreen[?]\)"), "fullRate(on screen: UIScreen?)"),
+    ],
+    # Window coordinates run downward here, and the toolbar is inside the split view.
+    "ToolbarObscuredScrollerInset.swift": [
+        (re.compile(r"frameInWindow[.]maxY - window[.]contentLayoutRect[.]maxY"), "UIWindow.ak_toolbarBottomY - frameInWindow.minY"),
+        (re.compile(r"styleMask[.]contains\([.]fullSizeContentView\) && locationInWindow[.]y > contentLayoutRect[.]maxY"), "locationInWindow.y < UIWindow.ak_toolbarBottomY"),
+    ],
+    "NativeForumBoardView.swift": [
+        (re.compile(r"\binteractions\b"), "boardInteractions"),
+        (re.compile(r"frameInWindow[.]maxY - window[.]contentLayoutRect[.]maxY"), "UIWindow.ak_toolbarBottomY - frameInWindow.minY"),
+    ],
+    # A UIScrollView is its own clip view, and vertical-only content has no sideways drift to pin.
+    "NativeMessageTimelineView.swift": [
+        (re.compile(r"/// Keeps the timeline's horizontal scroll position at zero[.].*?final class NativeTimelineClipView: NSClipView [{].*?\n[}]\n", re.S), ""),
+        (re.compile(r"\n *// The timeline only scrolls vertically, wherever it is placed[.]\n *scrollView[.]contentView = NativeTimelineClipView\(\)"), ""),
+    ],
+    "FileTypeIconCache.swift": [
+        (re.compile(r"NSWorkspace[.]shared[.]icon\(for: type\)[.]draw\(in: (CGRect\(x: 0, y: 0, width: pixels, height: pixels\))\)"),
+         lambda m: f"if let icon = AKFileTypeIcon.cgImage(for: type) {{ context.draw(icon, in: {m.group(1)}) }}"),
+    ],
+    "ForumBoardAccessibility.swift": [
+        (re.compile(r"subviews = subviews[.]filter [{] !\([$]0 is ForumBoardAccessibilityProxyView\) [}] [+] ordered"), "for proxy in ordered { addSubview(proxy) }"),
+    ],
+    "ForumChannelView.swift": [
+        (re.compile(r"geometry[.]containerSize"), "geometry.container__KEEPSize"),
+    ],
+    "NativeTimelineCodeCopyControl.swift": [
+        (re.compile(r"guard let layer else [{] return [}]"), "guard let layer: CALayer = layer else { return }"),
+    ],
+    "NativeTimelineCanvasDictionaryLookup.swift": [
+        (re.compile(r"override func pressureChange"), "func pressureChange"),
+    ],
+    "NativeTimelineCanvasView.swift": [
+        (re.compile(r"\n *pressureConfiguration = NSPressureConfiguration\([^\n]*"), ""),
+    ],
+    # NSLayoutManager's storage is optional on both platforms, unlike UITextView's.
+    "ComposerLayoutManager.swift": [
+        (re.compile(r"\btextStorage\b"), "textStorage__KEEP"),
+    ],
+    "ForumPostPreviewText.swift": [
+        (re.compile(r"let resolved = NSColor\(cgColor: color[.]cgColor\)"), "let resolved = Optional(NSColor(cgColor: color.cgColor))"),
+    ],
+    "ForumSearchField.swift": [
+        (re.compile(r"\bcontrol[.]stringValue = "), "(control as? NSTextField)?.stringValue = "),
+    ],
+    "DiscordLaunchIcon.swift": [
+        (re.compile(r"var transform = AffineTransform\(translationByX: frame[.]minX, byY: frame[.]minY\)\s*transform[.]scale\(scale\)"),
+         "let transform = CGAffineTransform(translationX: frame.minX, y: frame.minY).scaledBy(x: scale, y: scale)"),
+        (re.compile(r"shape[.]transform\(using: transform\)"), "shape.apply(transform)"),
+    ],
+    # UIKit's text tables use different edge names and cannot be subclassed to draw,
+    # so code blocks and quotes take plain fills and borders in the document viewer.
+    "MarkdownDocumentLayout.swift": [
+        (re.compile(r"\btextStorage\b"), "textStorage__KEEP"),
+        (re.compile(r"[.]absoluteValueType"), ".absolute"),
+        (re.compile(r"[.]percentageValueType"), ".percentage"),
+        (re.compile(r"[.]fixedLayoutAlgorithm"), ".fixed"),
+        (re.compile(r", edge: [.](min|max)([XY])\)"), lambda m: f", rectEdge: .{m.group(1)}{m.group(2)}Edge)"),
+        (re.compile(r", edge: edge\)"), ", rectEdge: edge)"),
+        (re.compile(r"\[NSRectEdge[.]min([XY]), [.]max([XY])\]"), lambda m: f"[CGRectEdge.min{m.group(1)}Edge, .max{m.group(2)}Edge]"),
+        (re.compile(r"setBorderColor\([.]separatorColor, for: [.]minY\)"), "setBorderColor(.separatorColor, rectEdge: .minYEdge)"),
+        (re.compile(r"override func drawBackground\(\s*withFrame"), "func drawBackground(\n        withFrame"),
+        (re.compile(r"(block[.]setWidth\(px\(8\) [+] 1, type: [.]absolute, for: [.]padding\))"),
+         lambda m: m.group(1) + "\n        block.backgroundColor = NativeTimelineRowPainter.discordCodeBackgroundColor"),
+        (re.compile(r"(block[.]setWidth\(px\(16\), type: [.]absolute, for: [.]padding, rectEdge: [.]minXEdge\))"),
+         lambda m: m.group(1) + "\n        block.setWidth(px(4), type: .absolute, for: .border, rectEdge: .minXEdge)\n        block.setBorderColor(.tertiaryLabel, rectEdge: .minXEdge)"),
+    ],
+    "MarkdownDocumentText.swift": [
+        (re.compile(r"textView[.]textStorage[.]flatMap"), "Optional(textView.textStorage).flatMap"),
+        (re.compile(r"textView[.]scroll\(NSPoint\("), "textView.enclosingScrollView?.scroll(to: NSPoint("),
+    ],
+    "NativeTimelineCanvasLinkContextMenu.swift": [
+        (re.compile(r"\n *icon[.]size = NSSize\(width: 16, height: 16\)"), ""),
+    ],
+    # UIView already has `interactions`.
+    "ForumBoardPointerInput.swift": [
+        (re.compile(r"\binteractions\b"), "boardInteractions"),
+    ],
+    "ForumBoardPresentation.swift": [
+        (re.compile(r"\binteractions\b"), "boardInteractions"),
+    ],
+    # macOS hangs these from the window's titlebar; iPadOS has none to reach, so the
+    # same items sit over the window's top edge, on the toolbar's row.
+    "WorkspaceTitlebar.swift": [
+        (re.compile(r"guard let titlebar = window[?][.]standardWindowButton\([.]closeButton\)[?][.]superview else [{].*?titlebar[.]addSubview\(overlay\)\n", re.S),
+         "installOverlay()\n"),
+        (re.compile(r"(        let overlay = WorkspaceTitlebarView\(\)\n)"),
+         lambda m: m.group(1) + """
+        func installOverlay() {
+            guard let content = window?.contentView else {
+                overlay.removeFromSuperview()
+                return
+            }
+            if overlay.superview !== content { content.addSubview(overlay) }
+            let frame = CGRect(x: 0, y: 0, width: content.bounds.width, height: UIWindow.ak_toolbarCenterY * 2)
+            if overlay.frame != frame { overlay.frame = frame }
+            overlay.autoresizingMask = [.width]
+        }
+"""),
+        (re.compile(r"(        )anchor[.]overlay[.]apply\("), lambda m: f"{m.group(1)}anchor.installOverlay()\n{m.group(1)}anchor.overlay.apply("),
+        (re.compile(r"\n *// The toolbar re-hosts its search field, in fresh glass, whenever.*?for name in \[NSToolbar[^\n]*[{].*?\n        [}]\n", re.S), "\n"),
+        (re.compile(r"    @objc private func toolbarItemsDidChange\(.*?\n    [}]\n", re.S), ""),
+        (re.compile(r"private var measuredLeadingControlsMaxX: CGFloat [{].*?\n    [}]\n", re.S),
+         "private var measuredLeadingControlsMaxX: CGFloat { 120 }\n"),
+        (re.compile(r"private var searchItemView: NSView[?] [{].*?\n    [}]\n", re.S), "private var searchItemView: NSView? { nil }\n"),
+        (re.compile(r"private var searchFieldMinX: CGFloat[?] [{].*?\n    [}]\n", re.S),
+         """private var searchFieldMinX: CGFloat? {
+        let metrics = PadToolbarSearch.shared.metrics
+        return PadToolbarSearch.shared.isVisible && metrics.isValid ? bounds.maxX - metrics.trailingInset - metrics.fieldWidth : nil
+    }
+"""),
+        (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
+    ],
+    "WindowModalOverlay.swift": [
+        (re.compile(r"override func resize\(withOldSuperviewSize"), "func resize(withOldSuperviewSize"),
+    ],
+    # iPadOS has no static code API and no way to run a downloaded app.
+    "PRBuildRecovery.swift": [
+        (re.compile(r"\n *var code: SecStaticCode[?].*?signatureVerificationFailed\(validationStatus\)\n\s*[}]", re.S), ""),
+    ],
+    "WindowModalCoordinator.swift": [
+        (re.compile(r"\(responder as[?] NSText\)[.]flatMap [{][^\n]*?[}] [?][?] "), ""),
+    ],
+    # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
+    "WorkspaceColumnsHost.swift": [
+        (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
+    ],
     "ComposerTextView.swift": [
         (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),
          "guard let textView = responder as? NSTextView else { return responder is UITextField }"),
@@ -260,13 +433,14 @@ FILE_RULES = {
         (re.compile(r"let root = CALayer\(\)"), "let root = layer"),
         (re.compile(r"^\s*layer = root\n", re.M), ""),
     ],
-    "NativeTimelineReactionInteraction.swift": [
-        (re.compile(r"(?<![\w])display\("), "setNeedsDisplay("),
+    "NativeTimelineReactionTransition.swift": [
+        (re.compile(r"^\s*layer = CALayer\(\)\n", re.M), ""),
     ],
     "NativeTimelineTextSpoilerGeometry.swift": [
         (re.compile(r"= view[.](textStorage|layoutManager|textContainer)(?=[, ])"), lambda m: f"= Optional(view.{m.group(1)})"),
     ],
     "SelectableMessageTextView.swift": [
+        (re.compile(r"[$]0[.]rangeValue"), "$0"),
         (re.compile(r"textContainer[?][.](maximumNumberOfLines|lineBreakMode)"), lambda m: f"textContainer__KEEP?.{m.group(1)}"),
     ],
     "EmojiPickerView.swift": [

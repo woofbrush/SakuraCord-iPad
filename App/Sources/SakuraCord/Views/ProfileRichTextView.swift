@@ -107,7 +107,10 @@ private struct ProfileStatusTextRepresentable: NSViewRepresentable {
         nsView textView: ProfileStatusNSTextView,
         context: Context
     ) -> CGSize? {
-        let width = proposal.width ?? InterfaceScale.metric(isExpanded ? 188 : 143)
+        // SwiftUI probes with an infinite width. A text view given that frame
+        // scrolls its enclosing scroll view during the update.
+        let width = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+            ?? InterfaceScale.metric(isExpanded ? 188 : 143)
         textView.frame.size.width = width
         textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
         guard let layoutManager = textView.layoutManager, let textContainer = textView.textContainer else {
@@ -178,7 +181,7 @@ private struct ProfileTextRepresentable: NSViewRepresentable {
         }
         context.coordinator.images = emojiImages
         context.coordinator.wasActive = editing?.isActive
-        textView.typingAttributes = ComposerEmojiAttributedText.textAttributes(.interfaceSystemFont(ofSize: 14))
+        textView.typingAttributes = ComposerTextStyle.composer(.interfaceSystemFont(ofSize: 14)).attributes
         textView.invalidateIntrinsicContentSize()
     }
 
@@ -187,7 +190,7 @@ private struct ProfileTextRepresentable: NSViewRepresentable {
         nsView textView: HoverLinkTextView,
         context: Context
     ) -> CGSize? {
-        let width = proposal.width ?? 298
+        let width = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 298
         textView.frame.size.width = width
         textView.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
         guard let layoutManager = textView.layoutManager, let textContainer = textView.textContainer else {
@@ -222,7 +225,7 @@ private struct ProfileTextRepresentable: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard parent.editing != nil, let textView = notification.object as? NSTextView else { return }
-            textView.typingAttributes = ComposerEmojiAttributedText.textAttributes(.interfaceSystemFont(ofSize: 14))
+            textView.typingAttributes = ComposerTextStyle.composer(.interfaceSystemFont(ofSize: 14)).attributes
         }
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
@@ -320,7 +323,7 @@ enum ProfileInlineAttributedText {
         font: NSFont,
         color: NSColor
     ) -> NSAttributedString {
-        var attributes = ComposerEmojiAttributedText.textAttributes(font)
+        var attributes = ComposerTextStyle.composer(font).attributes
         attributes[.foregroundColor] = color
         return NSAttributedString(string: text, attributes: attributes)
     }

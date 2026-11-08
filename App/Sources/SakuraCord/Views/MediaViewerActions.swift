@@ -9,6 +9,10 @@ nonisolated enum MediaSaveDestination: Sendable {
 
 @MainActor
 enum MediaViewerActionService {
+    /// Re-signs an expiring Discord attachment link before the viewer reads
+    /// or saves it.
+    @MainActor static var resolveRemoteURL: (@MainActor (URL) async -> URL)?
+
     static func copyText(_ value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
@@ -29,6 +33,7 @@ enum MediaViewerActionService {
         _ item: RichMediaItem,
         to saveDestination: MediaSaveDestination
     ) async throws -> URL? {
+        guard item.canSave else { return nil }
         let settings = StorageDownloadsSettingsStore.shared.load()
         var accessedFolder: URL?
         defer { accessedFolder?.stopAccessingSecurityScopedResource() }
@@ -37,19 +42,21 @@ enum MediaViewerActionService {
         case .saveAs:
             destination = await savePanelDestination(for: item)
         case .defaultFolder:
-            guard let folder = try StorageDownloadsSettingsStore.shared
-                .resolvedDefaultFolder()
-            else {
-                throw MediaViewerActionError.defaultDownloadFolderUnavailable
+            // Without a Default Download Folder, files save to Downloads, as
+            // file cards' downloads do.
+            var folder = URL.downloadsDirectory.resolvingSymlinksInPath()
+            if let chosen = try StorageDownloadsSettingsStore.shared.resolvedDefaultFolder() {
+                guard chosen.startAccessingSecurityScopedResource() else {
+                    throw MediaViewerActionError.defaultDownloadFolderUnavailable
+                }
+                accessedFolder = chosen
+                folder = chosen
             }
-            guard folder.startAccessingSecurityScopedResource() else {
-                throw MediaViewerActionError.defaultDownloadFolderUnavailable
-            }
-            accessedFolder = folder
             let proposed = folder.appendingPathComponent(
                 MediaViewerFilePolicy.suggestedFilename(
                     title: item.title,
-                    sourceURL: item.url
+                    sourceURL: item.url,
+                    contentType: item.contentType
                 )
             )
             guard let availableDestination = availableDestination(for: proposed) else {
@@ -59,7 +66,8 @@ enum MediaViewerActionService {
         }
 
         guard let destination else { return nil }
-        try await copyMedia(from: item.url, to: destination)
+        let source = await resolveRemoteURL?(item.url) ?? item.url
+        try await copyMedia(from: source, to: destination)
         if settings.revealsCompletedDownloads {
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         }
@@ -68,7 +76,9 @@ enum MediaViewerActionService {
 
     nonisolated static func availableDestination(
         for proposedURL: URL,
-        fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)
+        // A link counts as taken even when it points nowhere, since writing
+        // over it fails.
+        fileExists: (String) -> Bool = { (try? FileManager.default.attributesOfItem(atPath: $0)) != nil }
     ) -> URL? {
         guard fileExists(proposedURL.path) else { return proposedURL }
         let stem = proposedURL.deletingPathExtension().lastPathComponent
@@ -94,13 +104,14 @@ enum MediaViewerActionService {
         panel.isExtensionHidden = false
         panel.nameFieldStringValue = MediaViewerFilePolicy.suggestedFilename(
             title: item.title,
-            sourceURL: item.url
+            sourceURL: item.url,
+            contentType: item.contentType
         )
         panel.directoryURL = directory
         if let type = MediaViewerFilePolicy.contentType(
             title: item.title,
             sourceURL: item.url
-        ) {
+        ) ?? item.contentType {
             panel.allowedContentTypes = [type]
         }
 
@@ -160,7 +171,7 @@ enum MediaViewerActionService {
 
 }
 nonisolated enum MediaViewerFilePolicy {
-    static func suggestedFilename(title: String, sourceURL: URL) -> String {
+    static func suggestedFilename(title: String, sourceURL: URL, contentType: UTType? = nil) -> String {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = sourceURL.lastPathComponent.isEmpty
             ? "Media"
@@ -170,7 +181,9 @@ nonisolated enum MediaViewerFilePolicy {
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
 
-        let sourceExtension = sourceURL.pathExtension
+        let sourceExtension = sourceURL.pathExtension.isEmpty
+            ? contentType?.preferredFilenameExtension ?? ""
+            : sourceURL.pathExtension
         if (filename as NSString).pathExtension.isEmpty,
            !sourceExtension.isEmpty
         {
@@ -205,16 +218,26 @@ nonisolated enum MediaViewerDetails {
         return item.size.formatted(.byteCount(style: .file))
     }
 
+    /// A file's type and size as its card shows it, such as "PDF · 1.41 MB".
+    @MainActor static func fileDetail(_ item: RichMediaItem) -> String {
+        let pathExtension = (item.url.pathExtension.isEmpty ? (item.title as NSString).pathExtension : item.url.pathExtension)
+            .uppercased()
+        let size = item.size > 0 ? NativeTimelineFileCard.sizeText(item.size) : ""
+        return [pathExtension, size].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     static func kind(_ item: RichMediaItem) -> String {
         switch item.kind {
         case let .image(animated):
             animated ? "Animated image" : "Image"
-        case .video:
+        case .video, .youtube:
             "Video"
         case .audio:
             "Audio"
         case .file:
             "File"
+        case .text:
+            "Text file"
         }
     }
 }

@@ -355,7 +355,7 @@ final class PopoverContainerView: UIView {
 /// AppKit popovers are separate non-modal windows: hover cards do not take input,
 /// several can be open, and showing one again only moves it. UIKit's modal popover
 /// presentation allows none of that, so this is an overlay anchored to its view.
-public final class NSPopover: NSObject {
+open class NSPopover: NSObject {
     public enum Behavior: Sendable { case applicationDefined, transient, semitransient }
 
     public static let willShowNotification = Notification.Name("NSPopoverWillShowNotification")
@@ -510,7 +510,7 @@ public final class NSPopover: NSObject {
         DispatchQueue.main.async { [weak self] in self?.performClose(nil) }
     }
 
-    public func close() {
+    open func close() {
         guard isShown else { return }
         notify(Self.willCloseNotification) { delegate?.popoverWillClose?($0) }
         isShown = false
@@ -528,7 +528,7 @@ public final class NSPopover: NSObject {
         }
     }
 
-    public func performClose(_: Any?) {
+    open func performClose(_: Any?) {
         guard delegate?.popoverShouldClose?(self) != false else { return }
         close()
     }
@@ -575,6 +575,12 @@ open class NSSavePanel: NSObject, UIDocumentPickerDelegate {
     public func begin(completionHandler: @escaping (NSApplication.ModalResponse) -> Void) {
         guard let window = NSApp.keyWindow else { return completionHandler(.cancel) }
         beginSheetModal(for: window, completionHandler: completionHandler)
+    }
+
+    public func begin() async -> NSApplication.ModalResponse {
+        await withCheckedContinuation { continuation in
+            begin { continuation.resume(returning: $0) }
+        }
     }
 
     public func beginSheetModal(for window: UIWindow, completionHandler: @escaping (NSApplication.ModalResponse) -> Void) {
@@ -662,6 +668,7 @@ public nonisolated enum NSAccessibility {
         public let rawValue: String
         public init(rawValue: String) { self.rawValue = rawValue }
         public static let button = Role(rawValue: "button")
+        public static let headingRole = Role(rawValue: "heading")
         public static let group = Role(rawValue: "group")
         public static let staticText = Role(rawValue: "text")
         public static let image = Role(rawValue: "image")
@@ -731,6 +738,7 @@ public extension NSObject {
     func setAccessibilityElement(_ isElement: Bool) { isAccessibilityElement = isElement }
     func setAccessibilityHidden(_ hidden: Bool) { accessibilityElementsHidden = hidden }
     func setAccessibilityEnabled(_: Bool) {}
+    func setAccessibilityPlaceholderValue(_ value: String?) { accessibilityHint = value }
     func setAccessibilityRole(_: NSAccessibility.Role?) {}
     func setAccessibilityRoleDescription(_: String?) {}
     func setAccessibilityIdentifier(_: String?) {}
@@ -806,6 +814,8 @@ public struct NSCheckboxToggleStyle: ToggleStyle {
 
 // MARK: AVPlayerView
 
+@objc public protocol AVPlayerViewDelegate: NSObjectProtocol {}
+
 open class AVPlayerView: UIView {
     public enum ControlsStyle: Sendable { case none, inline, floating, minimal, `default` }
 
@@ -825,6 +835,8 @@ open class AVPlayerView: UIView {
     }
 
     public var showsFullScreenToggleButton = false
+    public weak var delegate: AVPlayerViewDelegate?
+    public var menu: NSMenu?
     public var allowsPictureInPicturePlayback: Bool {
         get { controller.allowsPictureInPicturePlayback }
         set { controller.allowsPictureInPicturePlayback = newValue }
@@ -848,6 +860,8 @@ public extension NSRange {
 open class NSTableRowView: UIView {}
 
 open class NSTableView: UIView {
+
+    public var allowsTypeSelect = false
     public enum SelectionHighlightStyle: Sendable { case none, regular, sourceList }
     public var selectionHighlightStyle: SelectionHighlightStyle = .regular
     public func rows(in _: CGRect) -> NSRange { NSRange(location: 0, length: 0) }

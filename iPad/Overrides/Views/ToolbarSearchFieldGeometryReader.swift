@@ -80,18 +80,22 @@ struct PadToolbarSearchField: View {
         @Bindable var model = model
         @Bindable var search = model.messageSearch
         @Bindable var onboarding = model.onboarding
-        let local = model.isBrowsingGuildChannels
+        @Bindable var friends = model.friends
+        let friendsSearch = model.isFriendsSearchActive
+        let local = friendsSearch || model.isBrowsingGuildChannels
         let tokens = local ? [] : search.tokens
-        let text = local ? onboarding.channelSearch : search.queryText
-        let wantsFocus = local ? onboarding.isChannelSearchFocused : search.isInputFocused
+        let text = friendsSearch ? model.friendsSearchText : local ? onboarding.channelSearch : search.queryText
+        let wantsFocus = friendsSearch ? friends.isSearchFocused
+            : local ? onboarding.isChannelSearchFocused : search.isInputFocused
         return HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .semibold))
             ForEach(tokens.suffix(2)) { chip($0) }
             TextField(
                 "",
-                text: local ? $onboarding.channelSearch : $model.messageSearchInputText,
-                prompt: Text(local ? "Search Channels" : model.messageSearchPromptTitle)
+                text: friendsSearch ? $model.friendsSearchText
+                    : local ? $onboarding.channelSearch : $model.messageSearchInputText,
+                prompt: Text(model.isBrowsingGuildChannels ? "Search Channels" : model.messageSearchPromptTitle)
             )
             .textFieldStyle(.plain)
             .font(.system(size: 15))
@@ -104,7 +108,13 @@ struct PadToolbarSearchField: View {
             }
             if !text.isEmpty || !tokens.isEmpty {
                 Button {
-                    if local { onboarding.channelSearch = "" } else { model.clearMessageSearchUsingBuiltInButton() }
+                    if friendsSearch {
+                        model.friendsSearchText = ""
+                    } else if local {
+                        onboarding.channelSearch = ""
+                    } else {
+                        model.clearMessageSearchUsingBuiltInButton()
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
@@ -131,7 +141,9 @@ struct PadToolbarSearchField: View {
             if isFocused != wanted { isFocused = wanted }
         }
         .onChange(of: isFocused) { _, focused in
-            if local {
+            if friendsSearch {
+                friends.isSearchFocused = focused
+            } else if local {
                 onboarding.isChannelSearchFocused = focused
             } else if focused {
                 search.isInputFocused = true
@@ -223,6 +235,7 @@ private struct PadSearchFieldAnchor: NSViewRepresentable {
             guard let window, !bounds.isEmpty else { return }
             let frame = convert(bounds, to: nil)
             UIWindow.ak_toolbarCenterY = frame.midY
+            UIWindow.ak_toolbarBottomY = frame.midY + 25
             let metrics = ToolbarSearchFieldMetrics(
                 fieldWidth: frame.width,
                 trailingInset: max(0, window.bounds.maxX - frame.maxX),

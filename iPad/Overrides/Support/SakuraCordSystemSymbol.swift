@@ -6,7 +6,7 @@ import SwiftUI
 /// reachable through UIKit's private lookup; custom ones are bundled templates.
 enum SakuraCordSystemSymbol {
     nonisolated static let emojiFaceGrinning = "emoji.face.grinning"
-    nonisolated static let stickerFill = "sticker.fill"
+    nonisolated static let sticker = "sticker"
     nonisolated static let thread = "thread"
     nonisolated static let applicationCommands = "xmark.triangle.circle.square.fill"
 
@@ -17,15 +17,16 @@ enum SakuraCordSystemSymbol {
     }
 
     private static func symbolImage(_ name: String, fallback: String) -> Image {
-        privateSymbol(name).map { Image(uiImage: $0).renderingMode(.template) } ?? Image(systemName: fallback)
+        if UIImage(systemName: name) != nil { return Image(systemName: name) }
+        return privateSymbol(name).map { Image(uiImage: $0).renderingMode(.template) } ?? Image(systemName: fallback)
     }
 
     static var emojiFaceGrinningImage: Image {
         symbolImage(emojiFaceGrinning, fallback: "face.smiling")
     }
 
-    static var stickerFillImage: Image {
-        symbolImage(stickerFill, fallback: "doc.richtext.fill")
+    static var stickerImage: Image {
+        symbolImage(sticker, fallback: "doc.richtext")
     }
 
     @ViewBuilder

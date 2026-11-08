@@ -28,37 +28,60 @@ public extension NSAttributedString.Key {
     static let discordMarkdownListMarker = NSAttributedString.Key(
         "dev.sakuracord.markdown.list-marker"
     )
+
+    /// Marks Markdown syntax in a draft's source, which an editor hides
+    /// unless the caret is in or beside the span it formats. The value is an
+    /// NSValue range: the character's offset into that span, and the span's
+    /// length.
+    static let discordMarkdownSyntax = NSAttributedString.Key(
+        "dev.sakuracord.markdown.syntax"
+    )
+
+    /// One of Discord's CSS pixels at this text's size: its body font size
+    /// over Discord's 16. Code blocks, quotes, and list markers carry it so
+    /// the painter sizes their chrome with the text. An NSNumber.
+    static let discordMarkdownEm = NSAttributedString.Key(
+        "dev.sakuracord.markdown.em"
+    )
 }
 
 public enum DiscordMarkdown {
     public struct AppKitPlan: Hashable, Sendable {
         public struct Line: Hashable, Sendable {
-            fileprivate let runs: [InlineRun]
+            fileprivate var runs: [InlineRun]
             fileprivate let block: Block
+            /// Inside a `>` or `>>>` block quote, which can hold any
+            /// non-code block, as in Discord.
+            fileprivate var isQuoted = false
+            /// The widest number in this item's ordered list, which sizes
+            /// the gutter so every item's text shares one column.
+            fileprivate var widestMarker = ""
         }
 
         fileprivate enum Block: Hashable, Sendable {
             case paragraph
             case heading(Int)
             case subtext
-            case quote
-            case unorderedList
-            case orderedList
-            case code(language: String?)
+            /// A list item at its nesting depth, starting from zero.
+            case listItem(level: Int, isOrdered: Bool)
+            /// One line of a fenced block; `isFirstLine` separates adjacent fences.
+            case code(language: String?, isFirstLine: Bool)
         }
 
-        fileprivate struct InlineRun: Hashable, Sendable {
-            fileprivate let text: String
-            fileprivate let traits: InlineTraits
-            fileprivate let link: URL?
-            fileprivate let color: SemanticColor?
+        struct InlineRun: Hashable, Sendable {
+            let text: String
+            let traits: InlineTraits
+            let link: URL?
+            let color: SemanticColor?
             /// Identifies the spoiler containing this run by the line and UTF-8
             /// offset of its opening delimiter. Spoilers never nest, since each
             /// one closes at the nearest delimiter.
-            fileprivate var spoilerID: Int?
+            var spoilerID: Int?
+            /// A link written as <…>, which Discord never previews.
+            var suppressesPreview = false
         }
 
-        fileprivate struct InlineTraits: OptionSet, Hashable, Sendable {
+        struct InlineTraits: OptionSet, Hashable, Sendable {
             let rawValue: UInt8
 
             static let bold = Self(rawValue: 1 << 0)
@@ -70,17 +93,34 @@ public enum DiscordMarkdown {
             static let listMarker = Self(rawValue: 1 << 6)
         }
 
-        fileprivate enum SemanticColor: Int, Hashable, Sendable {
+        enum SemanticColor: Int, Hashable, Sendable {
             case jsonKey
             case jsonString
             case jsonNumber
             case jsonKeyword
+            case codeKeyword
+            case codeTitle
+            case codeString
+            case codeNumber
+            case codeOperator
+            case codeComment
+        }
+
+        /// What a file's code reads on when that isn't the appearance it is
+        /// drawn in, as on the media viewer's panel inside its dark chrome.
+        public enum CodeBackground: Hashable, Sendable {
+            case dark
+            case light
         }
 
         public let lines: [Line]
+        /// Pins the code colours to that background; a message's own code
+        /// follows the appearance it is drawn in.
+        fileprivate let codeBackground: CodeBackground?
 
-        fileprivate init(lines: [Line]) {
+        fileprivate init(lines: [Line], codeBackground: CodeBackground? = nil) {
             self.lines = lines
+            self.codeBackground = codeBackground
         }
     }
 
@@ -105,7 +145,7 @@ public enum DiscordMarkdown {
         var segmentStart = source.startIndex
         var inCodeFence = false
         let collect: (Range<String.Index>, AppKitPlan.InlineTraits, String) -> Void = { range, traits, delimiter in
-            guard !traits.isDisjoint(with: [.bold, .italic, .underline]) else { return }
+            guard !traits.isDisjoint(with: [.bold, .italic, .underline]), !traits.contains(.inlineCode) else { return }
             formats.append(SourceFormat(
                 range: NSRange(range, in: source),
                 delimiter: delimiter,
@@ -123,9 +163,8 @@ public enum DiscordMarkdown {
             inCodeFence.toggle()
             segmentStart = line.endIndex
         }
-        if !inCodeFence {
-            _ = inlineRuns(source[segmentStart...], inheritedTraits: [], inheritedLink: nil, sourceCollector: collector)
-        }
+        // Text after a fence that never closes is text, as Discord shows it.
+        _ = inlineRuns(source[segmentStart...], inheritedTraits: [], inheritedLink: nil, sourceCollector: collector)
         return formats
     }
 
@@ -148,12 +187,6 @@ public enum DiscordMarkdown {
     ]
 
     private static let appKitCache = AppKitMarkdownRenderCache()
-    private static let codeForegroundColor = NSColor(
-        srgbRed: 219 / 255,
-        green: 222 / 255,
-        blue: 225 / 255,
-        alpha: 1
-    )
 
     public static func attributed(_ source: String) -> AttributedString {
         let plan = appKitPlan(source)
@@ -220,75 +253,52 @@ public enum DiscordMarkdown {
         return result
     }
 
+    /// A text file planned as one fenced block in `language`, so its lines are
+    /// highlighted as a message's code block is, whatever fences it contains.
+    public static func appKitCodePlan(
+        _ source: String, language: String?, on background: AppKitPlan.CodeBackground
+    ) -> AppKitPlan {
+        let language = language?.lowercased()
+        return AppKitPlan(lines: source.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map {
+            AppKitPlan.Line(
+                runs: codeRuns(String($1), language: language),
+                block: .code(language: language, isFirstLine: $0 == 0)
+            )
+        }, codeBackground: background)
+    }
+
     public static func appKitPlan(_ source: String) -> AppKitPlan {
-        let rawLines = source.split(
-            separator: "\n",
-            omittingEmptySubsequences: false
-        )
         var lines: [AppKitPlan.Line] = []
-        lines.reserveCapacity(rawLines.count)
-        var codeLanguage: String?
-        var isInCodeFence = false
-        var isInMultilineQuote = false
+        var unclosedFence: String?
+        var list = ListNesting()
 
-        for rawLine in rawLines {
-            let line = String(rawLine)
-            if line.hasPrefix("```") {
-                if isInCodeFence {
-                    isInCodeFence = false
-                    codeLanguage = nil
-                } else {
-                    isInCodeFence = true
-                    let suffix = line.dropFirst(3)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    codeLanguage = suffix.isEmpty ? nil : suffix.lowercased()
+        forEachSourceLine(source) { rawLine, kind in
+            switch kind {
+            case let .fence(opening):
+                unclosedFence = opening
+                list = ListNesting()
+            case let .code(language, isFirstLine):
+                lines.append(AppKitPlan.Line(
+                    runs: codeRuns(String(rawLine), language: language),
+                    block: .code(language: language, isFirstLine: isFirstLine)
+                ))
+            case let .text(content, isQuoted):
+                if lines.last.map({ $0.isQuoted != isQuoted }) == true {
+                    list = ListNesting()
                 }
-                continue
+                var line = planLine(content, list: &list)
+                line.isQuoted = isQuoted
+                lines.append(line)
             }
-
-            if isInCodeFence {
-                lines.append(
-                    AppKitPlan.Line(
-                        runs: codeRuns(line, language: codeLanguage),
-                        block: .code(language: codeLanguage)
-                    )
-                )
-                continue
-            }
-
-            if isInMultilineQuote {
-                if line.isEmpty {
-                    isInMultilineQuote = false
-                } else {
-                    lines.append(
-                        DiscordMarkdown.line(line, block: .quote)
-                    )
-                    continue
-                }
-            }
-            if line.hasPrefix(">>> ") {
-                isInMultilineQuote = true
-                lines.append(
-                    DiscordMarkdown.line(
-                        String(line.dropFirst(4)),
-                        block: .quote
-                    )
-                )
-                continue
-            }
-
-            lines.append(planLine(line))
         }
 
         // Discord shows the literal opening fence when a message never closes
         // it. Keep malformed input visible instead of silently discarding it.
-        if isInCodeFence {
-            let language = codeLanguage.map { $0.isEmpty ? "" : $0 } ?? ""
-            let opening = "```" + language
+        if let unclosedFence {
             let fence = AppKitPlan.Line(
                 runs: [
                     AppKitPlan.InlineRun(
-                        text: opening,
+                        text: unclosedFence,
                         traits: [],
                         link: nil,
                         color: nil
@@ -303,115 +313,227 @@ public enum DiscordMarkdown {
             lines.insert(fence, at: firstCodeIndex)
         }
 
+        alignOrderedMarkers(&lines)
         return AppKitPlan(lines: qualifyingSpoilerIDs(lines))
     }
 
+    /// How message rendering reads one line of source.
+    private enum SourceLine {
+        /// A fence that opens a block, as its literal opening with the
+        /// language, or that closes one.
+        case fence(opening: String?)
+        case code(language: String?, isFirstLine: Bool)
+        /// Text after any quote prefix.
+        case text(Substring, isQuoted: Bool)
+    }
+
+    private static func forEachSourceLine(_ source: String, _ body: (Substring, SourceLine) -> Void) {
+        var codeLanguage: String?
+        var isInCodeFence = false
+        var startsCodeFence = false
+        var isInMultilineQuote = false
+        for rawLine in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            if rawLine.hasPrefix("```") {
+                isInCodeFence.toggle()
+                startsCodeFence = isInCodeFence
+                let suffix = rawLine.dropFirst(3).trimmingCharacters(in: .whitespacesAndNewlines)
+                codeLanguage = isInCodeFence && !suffix.isEmpty ? suffix.lowercased() : nil
+                body(rawLine, .fence(opening: isInCodeFence ? "```" + (codeLanguage ?? "") : nil))
+            } else if isInCodeFence {
+                body(rawLine, .code(language: codeLanguage, isFirstLine: startsCodeFence))
+                startsCodeFence = false
+            } else {
+                // `>>>` quotes the rest of the message, blank lines included.
+                var content = rawLine
+                var isQuoted = isInMultilineQuote
+                if !isQuoted, content.hasPrefix(">>> ") {
+                    isInMultilineQuote = true
+                    isQuoted = true
+                    content = content.dropFirst(4)
+                } else if !isQuoted, content.hasPrefix("> ") {
+                    isQuoted = true
+                    content = content.dropFirst(2)
+                } else if !isQuoted, let quoted = quoteContent(content) {
+                    isQuoted = true
+                    content = quoted
+                }
+                body(rawLine, .text(content, isQuoted: isQuoted))
+            }
+        }
+    }
+
+    /// The text after a `>` quote marker that Swift reads as part of a
+    /// larger character. Embed providers put invisible variation selectors
+    /// beside the marker, which merge with it, so it is read by scalar. A line
+    /// of only the marker and such spacers is a blank line inside the quote.
+    /// A lone `>` is not a quote, as in Discord.
+    private static func quoteContent(_ line: Substring) -> Substring? {
+        let scalars = line.unicodeScalars
+        guard scalars.first == ">" else { return nil }
+        let marker = scalars.dropFirst()
+        let rest = marker.drop { $0.properties.isDefaultIgnorableCodePoint }
+        if rest.startIndex != marker.startIndex,
+           rest.allSatisfy({ CharacterSet.whitespaces.contains($0) || $0.properties.isDefaultIgnorableCodePoint })
+        {
+            // Empty, but still a slice of the line: the source styler
+            // measures syntax from the line's start to the content's.
+            return line[line.endIndex...]
+        }
+        guard rest.first == " " else { return nil }
+        return Substring(rest.dropFirst().drop { $0.properties.isDefaultIgnorableCodePoint })
+    }
+
+    /// Gives every item of an ordered list the list's widest marker. A list
+    /// ends at a line that is not one of its items or nested beneath them.
+    private static func alignOrderedMarkers(_ lines: inout [AppKitPlan.Line]) {
+        var open: [Int: [Int]] = [:]
+        func close(from level: Int) {
+            for (listLevel, indices) in open where listLevel >= level {
+                let widest = indices.map { lines[$0].runs[0].text }.max { $0.count < $1.count } ?? ""
+                for index in indices {
+                    lines[index].widestMarker = widest
+                }
+                open[listLevel] = nil
+            }
+        }
+        for index in lines.indices {
+            if index > 0, lines[index - 1].isQuoted != lines[index].isQuoted {
+                close(from: 0)
+            }
+            guard case let .listItem(level, isOrdered) = lines[index].block else {
+                close(from: 0)
+                continue
+            }
+            close(from: level + 1)
+            if isOrdered {
+                open[level, default: []].append(index)
+            }
+        }
+        close(from: 0)
+    }
+
+    /// `usesMessageLineHeight` gives paragraphs and list items Discord's
+    /// message line height; embeds and previews keep natural lines.
+    /// `reservesCodeCopyButton` ends a code block's first lines before the
+    /// copy button the timeline shows in the block's top-trailing corner.
     public static func appKitAttributed(
         _ plan: AppKitPlan,
-        baseFontSize: CGFloat = 15
+        baseFontSize: CGFloat = 15,
+        usesMessageLineHeight: Bool = false,
+        reservesCodeCopyButton: Bool = false
     ) -> NSAttributedString {
         let output = NSMutableAttributedString()
+        let metrics = BlockMetrics(
+            baseFontSize: baseFontSize,
+            usesMessageLineHeight: usesMessageLineHeight,
+            reservesCodeCopyButton: reservesCodeCopyButton,
+            codeAppearance: plan.codeBackground.flatMap { NSAppearance(named: $0 == .light ? .aqua : .darkAqua) }
+        )
 
+        var previousParagraph: NSParagraphStyle?
         for (lineIndex, linePlan) in plan.lines.enumerated() {
-            appendLineSeparator(
-                to: output,
-                before: lineIndex,
-                plan: plan,
-                baseFontSize: baseFontSize
-            )
-            output.append(attributedLine(
-                linePlan,
-                index: lineIndex,
-                plan: plan,
-                baseFontSize: baseFontSize
-            ))
+            let paragraph = paragraphStyle(for: linePlan, index: lineIndex, in: plan.lines, metrics: metrics)
+            if let previousParagraph {
+                // An empty line is a paragraph of only its newline, which
+                // then carries the line's height and spacing.
+                let previous = plan.lines[lineIndex - 1]
+                var separator: [NSAttributedString.Key: Any] = [:]
+                // A break between quoted lines keeps one quote range.
+                if previous.runs.isEmpty || previous.isQuoted && linePlan.isQuoted {
+                    if previous.runs.isEmpty { separator[.font] = NSFont.systemFont(ofSize: baseFontSize) }
+                    separator[.paragraphStyle] = previousParagraph
+                    separator[.discordMarkdownBlock] = blockName(for: previous)
+                    separator[.discordMarkdownEm] = NSNumber(value: metrics.em)
+                }
+                output.append(NSAttributedString(string: "\n", attributes: separator))
+            }
+            output.append(attributedLine(linePlan, paragraph: paragraph, metrics: metrics))
+            previousParagraph = paragraph
         }
 
         return NSAttributedString(attributedString: output)
     }
 
-    private static func appendLineSeparator(
-        to output: NSMutableAttributedString,
-        before lineIndex: Int,
-        plan: AppKitPlan,
-        baseFontSize: CGFloat
-    ) {
-        guard lineIndex > 0 else { return }
-        let previousLine = plan.lines[lineIndex - 1]
-        if previousLine.runs.isEmpty {
-            output.append(
-                NSAttributedString(
-                    string: "\n",
-                    attributes: [
-                        .font: NSFont.systemFont(ofSize: baseFontSize),
-                        .foregroundColor: NSColor.labelColor,
-                        .paragraphStyle: blankParagraphStyle(),
-                    ]
-                )
-            )
-        } else {
-            output.append(NSAttributedString(string: "\n"))
-        }
-    }
-
     private static func attributedLine(
         _ linePlan: AppKitPlan.Line,
-        index lineIndex: Int,
-        plan: AppKitPlan,
-        baseFontSize: CGFloat
+        paragraph: NSParagraphStyle,
+        metrics: BlockMetrics
     ) -> NSAttributedString {
         let line = NSMutableAttributedString()
-        for run in linePlan.runs {
+        for (index, run) in linePlan.runs.enumerated() {
+            var text = run.text
+            var runAttributes = attributes(for: run, in: linePlan, metrics: metrics)
+            // Tab stops place the marker in Discord's list gutter and align
+            // wrapped item text with its first line.
+            if case let .listItem(_, isOrdered) = linePlan.block {
+                if index == 0, isOrdered {
+                    text = "\t" + text
+                    runAttributes[.font] = metrics.orderedMarkerFont
+                } else if index == 1 {
+                    text = "\t"
+                }
+            }
             line.append(NSAttributedString(
-                string: run.text,
-                attributes: attributes(
-                    for: run,
-                    block: linePlan.block,
-                    baseFontSize: baseFontSize
-                )
+                string: text,
+                attributes: runAttributes
             ))
         }
-        let startsCodeBlock = isCodeBlock(linePlan)
-            && (lineIndex == plan.lines.startIndex
-                || !isCodeBlock(plan.lines[lineIndex - 1]))
-        let endsCodeBlock = isCodeBlock(linePlan)
-            && (lineIndex == plan.lines.index(before: plan.lines.endIndex)
-                || !isCodeBlock(plan.lines[lineIndex + 1]))
-        let startsListBlock = isListBlock(linePlan)
-            && (lineIndex == plan.lines.startIndex
-                || !isSameListBlock(linePlan, plan.lines[lineIndex - 1]))
-        let startsInlineCodeLine = lineIndex > plan.lines.startIndex
-            && !plan.lines[lineIndex - 1].runs.isEmpty
-            && isInlineCodeOnlyLine(linePlan)
-        let paragraph = paragraphStyle(
-            for: linePlan.block,
-            startsListBlock: startsListBlock,
-            startsInlineCodeLine: startsInlineCodeLine,
-            startsCodeBlock: startsCodeBlock,
-            endsCodeBlock: endsCodeBlock
-        )
         let fullRange = NSRange(location: 0, length: line.length)
-        if fullRange.length > 0 {
-            line.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
-            if let blockName = blockAttribute(for: linePlan.block) {
-                line.addAttribute(.discordMarkdownBlock, value: blockName, range: fullRange)
+        guard fullRange.length > 0 else { return line }
+        line.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
+        if let blockName = blockName(for: linePlan) {
+            line.addAttribute(.discordMarkdownBlock, value: blockName, range: fullRange)
+            line.addAttribute(.discordMarkdownEm, value: NSNumber(value: metrics.em), range: fullRange)
+        }
+        padInlineCode(in: line)
+        return line
+    }
+
+    private static func blockName(for line: AppKitPlan.Line) -> NSString? {
+        if case .code = line.block { return "code" }
+        return line.isQuoted ? "quote" : nil
+    }
+
+    /// The room inline code's border takes on each side.
+    public static func inlineCodePadding(font: NSFont) -> CGFloat {
+        font.pointSize * 0.2 + 1
+    }
+
+    /// Discord pads inline code inside its border. Kerning after the
+    /// preceding character and after the code reserves that padding, so the
+    /// painted background never covers neighbouring text.
+    public static func padInlineCode(in line: NSMutableAttributedString) {
+        let source = line.string as NSString
+        line.enumerateAttribute(
+            .discordMarkdownInlineCode,
+            in: NSRange(location: 0, length: line.length)
+        ) { value, range, _ in
+            guard value != nil, range.length > 0,
+                  let font = line.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+            else { return }
+            let padding = inlineCodePadding(font: font)
+            let last = source.rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1)
+            line.addAttribute(.kern, value: padding, range: last)
+            if range.location > 0 {
+                let previous = source.rangeOfComposedCharacterSequence(at: range.location - 1)
+                line.addAttribute(.kern, value: padding, range: previous)
             }
         }
-        return line
     }
 
     private static func attributes(
         for run: AppKitPlan.InlineRun,
-        block: AppKitPlan.Block,
-        baseFontSize: CGFloat
+        in line: AppKitPlan.Line,
+        metrics: BlockMetrics
     ) -> [NSAttributedString.Key: Any] {
-        var attributes: [NSAttributedString.Key: Any] = [
-            .font: appKitFont(block: block, traits: run.traits, baseFontSize: baseFontSize),
-            .foregroundColor: foregroundColor(block: block, semanticColor: run.color),
-        ]
-        if case .code = block, run.color == nil {
-            attributes[.foregroundColor] = codeForegroundColor
+        var color = foregroundColor(for: line, semanticColor: run.color)
+        if let appearance = metrics.codeAppearance {
+            appearance.performAsCurrentDrawingAppearance { color = NSColor(cgColor: color.cgColor) ?? color }
         }
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: appKitFont(block: line.block, traits: run.traits, metrics: metrics),
+            .foregroundColor: color,
+        ]
         if run.traits.contains(.underline) {
             attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
@@ -420,10 +542,10 @@ public enum DiscordMarkdown {
         }
         if run.traits.contains(.inlineCode) {
             attributes[.discordMarkdownInlineCode] = NSNumber(value: true)
-            attributes[.foregroundColor] = codeForegroundColor
         }
-        if run.traits.contains(.listMarker) {
-            attributes[.discordMarkdownListMarker] = NSNumber(value: true)
+        if run.traits.contains(.listMarker), case let .listItem(level, _) = line.block {
+            attributes[.discordMarkdownListMarker] = NSNumber(value: level)
+            attributes[.discordMarkdownEm] = NSNumber(value: metrics.em)
             attributes[.foregroundColor] = NSColor.clear
         }
         if let link = run.link {
@@ -436,94 +558,71 @@ public enum DiscordMarkdown {
         return attributes
     }
 
-    private static func planLine(_ source: String) -> AppKitPlan.Line {
-        if source.hasPrefix("### ") {
-            return line(
-                String(source.dropFirst(4)),
-                block: .heading(3)
+    /// The open lists above the current item, so items nest by indentation
+    /// and keep the kind and numbering of the list they continue.
+    private struct ListNesting {
+        struct Level {
+            let indentation: Int
+            let isOrdered: Bool
+            var nextNumber: Int
+        }
+
+        var levels: [Level] = []
+
+        /// Discord renders a list with the first item's kind and numbers
+        /// items consecutively from the first item's number.
+        mutating func item(indentation: Int, number: Int?) -> (block: AppKitPlan.Block, marker: String) {
+            while let last = levels.last, indentation < last.indentation {
+                levels.removeLast()
+            }
+            if levels.last.map({ indentation > $0.indentation }) ?? true {
+                levels.append(Level(indentation: indentation, isOrdered: number != nil, nextNumber: number ?? 1))
+            }
+            let index = levels.count - 1
+            let level = levels[index]
+            // Saturates, so a number such as `9223372036854775807.` cannot trap.
+            levels[index].nextNumber = min(level.nextNumber, .max - 1) + 1
+            return (
+                .listItem(level: index, isOrdered: level.isOrdered),
+                level.isOrdered ? "\(level.nextNumber)." : "•"
             )
         }
-        if source.hasPrefix("## ") {
-            return line(
-                String(source.dropFirst(3)),
-                block: .heading(2)
-            )
+    }
+
+    private static func planLine(_ source: Substring, list: inout ListNesting) -> AppKitPlan.Line {
+        if let item = listItemContent(source) {
+            let indentation = source.prefix { $0 == " " }.count
+            let (block, marker) = list.item(indentation: indentation, number: item.number)
+            let isBulleted = if case .listItem(_, false) = block { true } else { false }
+            let runs = [
+                AppKitPlan.InlineRun(
+                    text: marker,
+                    traits: isBulleted ? .listMarker : [],
+                    link: nil,
+                    color: nil
+                ),
+                AppKitPlan.InlineRun(text: " ", traits: [], link: nil, color: nil),
+            ] + inlineRuns(item.content, inheritedTraits: [], inheritedLink: nil)
+            return AppKitPlan.Line(runs: runs, block: block)
         }
-        if source.hasPrefix("# ") {
-            return line(
-                String(source.dropFirst(2)),
-                block: .heading(1)
-            )
-        }
-        if source.hasPrefix("-# ") {
-            return line(
-                String(source.dropFirst(3)),
-                block: .subtext
-            )
-        }
-        if source.hasPrefix(">>> ") {
-            return line(
-                String(source.dropFirst(4)),
-                block: .quote
-            )
-        }
-        if source.hasPrefix("> ") {
-            return line(
-                String(source.dropFirst(2)),
-                block: .quote
-            )
-        }
-        if source.hasPrefix("- ") || source.hasPrefix("* ") {
-            return unorderedListLine(
-                source.dropFirst(2)
-            )
-        }
-        if let ordered = orderedListContent(source) {
-            return line(
-                ordered.marker + ordered.content,
-                block: .orderedList
-            )
+        list = ListNesting()
+        if let candidate = blockPrefixes.first(where: { source.hasPrefix($0.prefix) }) {
+            return line(source.dropFirst(candidate.prefix.count), block: candidate.block)
         }
         return line(source, block: .paragraph)
     }
 
-    private static func unorderedListLine(
-        _ content: Substring
-    ) -> AppKitPlan.Line {
-        var runs = [
-            AppKitPlan.InlineRun(
-                text: "•",
-                traits: .listMarker,
-                link: nil,
-                color: nil
-            ),
-            AppKitPlan.InlineRun(
-                text: " ",
-                traits: [],
-                link: nil,
-                color: nil
-            ),
-        ]
-        runs.append(
-            contentsOf: inlineRuns(
-                content,
-                inheritedTraits: [],
-                inheritedLink: nil
-            )
-        )
-        return AppKitPlan.Line(
-            runs: runs,
-            block: .unorderedList
-        )
-    }
+    private static let blockPrefixes: [(prefix: String, block: AppKitPlan.Block)] = [
+        ("### ", .heading(3)), ("## ", .heading(2)), ("# ", .heading(1)), ("-# ", .subtext),
+    ]
 
     private static func line(
-        _ source: String,
+        _ source: Substring,
         block: AppKitPlan.Block
     ) -> AppKitPlan.Line {
         AppKitPlan.Line(
             runs: inlineRuns(
-                source[...],
+                source,
                 inheritedTraits: [],
                 inheritedLink: nil
             ),
@@ -531,25 +630,20 @@ public enum DiscordMarkdown {
         )
     }
 
-    private static func orderedListContent(
-        _ source: String
-    ) -> (marker: String, content: Substring)? {
-        var cursor = source.startIndex
-        while cursor < source.endIndex, source[cursor].isNumber {
-            cursor = source.index(after: cursor)
+    /// `- item`, `* item` or `1. item` after any indentation.
+    private static func listItemContent(
+        _ source: Substring
+    ) -> (number: Int?, content: Substring)? {
+        let marker = source.drop { $0 == " " }
+        if marker.hasPrefix("- ") || marker.hasPrefix("* ") {
+            return (nil, marker.dropFirst(2))
         }
-        guard cursor > source.startIndex,
-              cursor < source.endIndex,
-              source[cursor] == "."
+        let digits = marker.prefix { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty,
+              marker.dropFirst(digits.count).hasPrefix(". "),
+              let number = Int(digits)
         else { return nil }
-        let space = source.index(after: cursor)
-        guard space < source.endIndex, source[space] == " " else {
-            return nil
-        }
-        return (
-            String(source[...space]),
-            source[source.index(after: space)...]
-        )
+        return (number, marker.dropFirst(digits.count + 2))
     }
 
     private static func inlineRuns(
@@ -592,14 +686,10 @@ public enum DiscordMarkdown {
                let close = nextInlineTerminator("`", in: source, from: source.index(after: cursor), collector: sourceCollector)
             {
                 flushPlain()
-                result.append(
-                    AppKitPlan.InlineRun(
-                        text: String(source[source.index(after: cursor) ..< close]),
-                        traits: inheritedTraits.union(.inlineCode),
-                        link: inheritedLink,
-                        color: nil
-                    )
-                )
+                result.append(inlineCodeRun(
+                    source[source.index(after: cursor) ..< close],
+                    traits: inheritedTraits, link: inheritedLink, sourceCollector: sourceCollector
+                ))
                 cursor = source.index(after: close)
                 continue
             }
@@ -613,6 +703,7 @@ public enum DiscordMarkdown {
                )
             {
                 flushPlain()
+                sourceCollector?.collectLink?(source.index(after: cursor) ..< source.index(before: autolink.endIndex), autolink.endIndex)
                 result.append(autolink.run)
                 cursor = autolink.endIndex
                 continue
@@ -690,7 +781,8 @@ public enum DiscordMarkdown {
                 ),
                 traits: traits,
                 link: url,
-                color: nil
+                color: nil,
+                suppressesPreview: true
             ),
             source.index(after: close)
         )
@@ -704,16 +796,18 @@ public enum DiscordMarkdown {
         sourceCollector: SourceFormatCollector? = nil
     ) -> (runs: [AppKitPlan.InlineRun], endIndex: String.Index)? {
         guard let target = markdownLinkTarget(in: source, at: cursor, collector: sourceCollector) else { return nil }
-        return (
-            inlineRuns(
-                source[target.label],
-                inheritedTraits: inheritedTraits,
-                inheritedLink: target.url,
-                widgetRules: widgetRules,
-                sourceCollector: sourceCollector
-            ),
-            target.end
+        sourceCollector?.collectLink?(target.label, target.end)
+        var runs = inlineRuns(
+            source[target.label],
+            inheritedTraits: inheritedTraits,
+            inheritedLink: target.url,
+            widgetRules: widgetRules,
+            sourceCollector: sourceCollector
         )
+        if target.suppressesPreview {
+            for index in runs.indices where runs[index].link == target.url { runs[index].suppressesPreview = true }
+        }
+        return (runs, target.end)
     }
 
     private static func nextInlineTerminator(
@@ -745,7 +839,8 @@ public enum DiscordMarkdown {
         return MarkdownLinkTarget(
             label: source.index(after: cursor) ..< labelEnd,
             url: url,
-            end: source.index(after: closingParenthesis)
+            end: source.index(after: closingParenthesis),
+            suppressesPreview: source[source.index(after: openingParenthesis)...].first == "<"
         )
     }
 
@@ -790,7 +885,7 @@ public enum DiscordMarkdown {
             // except that a spoiler, like Discord's `\|\|([\s\S]+?)\|\|`, holds at
             // least one character before its nearest closing delimiter.
             let isSpoiler = delimiter.traits.contains(.spoiler)
-            let closingRange = if let sourceCollector {
+            let closingRange = if let sourceCollector, sourceCollector.matchesComposerDelimiters {
                 composerClosingDelimiter(delimiter.marker, in: source, after: contentStart, collector: sourceCollector)
             } else if isSpoiler {
                 contentStart < source.endIndex
@@ -958,7 +1053,7 @@ public enum DiscordMarkdown {
         }
     }
 
-    private static func firstURL(
+    static func firstURL(
         in source: Substring, anchored: Bool = false
     ) -> (range: Range<String.Index>, url: URL)? {
         let candidates = ["https://", "http://"].compactMap { prefix -> Range<String.Index>? in
@@ -1000,172 +1095,100 @@ public enum DiscordMarkdown {
         return (range, url)
     }
 
-    private static func codeRuns(
-        _ source: String,
-        language: String?
-    ) -> [AppKitPlan.InlineRun] {
-        if source.contains("\u{001B}") {
-            // Discord's current renderer does not interpret ANSI SGR in this
-            // fixture. The control character itself has no visible glyph,
-            // while the bracketed escape payload remains literal.
-            return [
-                AppKitPlan.InlineRun(
-                    text: source.replacingOccurrences(
-                        of: "\u{001B}",
-                        with: ""
-                    ),
-                    traits: [],
-                    link: nil,
-                    color: nil
-                )
-            ]
+    /// Discord's block metrics, scaled from its 16 px body text to this
+    /// text's base size: every length is Discord's CSS pixels times `em`.
+    private struct BlockMetrics {
+        let baseFontSize: CGFloat
+        /// One of Discord's CSS pixels at this text's size.
+        var em: CGFloat { baseFontSize / 16 }
+        var listIndent: CGFloat { px(16) }
+        var orderedMarkerGap: CGFloat { px(4) }
+        var quoteIndent: CGFloat { px(16) }
+        var codeInset: CGFloat { px(8) }
+        /// Discord's 22 px line for 16 px message text, as a floor under
+        /// paragraphs and list items; zero outside messages.
+        let bodyLineHeight: CGFloat
+        /// The empty line Discord leaves after a closing code fence.
+        let emptyLineHeight: CGFloat
+        /// Discord's 18 px code line.
+        var codeLineHeight: CGFloat { px(18) }
+        let reservesCodeCopyButton: Bool
+        /// The appearance a pinned plan's colours resolve in.
+        let codeAppearance: NSAppearance?
+        /// Room at the end of a code block's first lines for the timeline's
+        /// copy button: a square filling a one-line block less a 4 px inset,
+        /// kept that inset from the block's edge.
+        var codeCopyButtonReserve: CGFloat {
+            reservesCodeCopyButton ? codeLineHeight + codeInset * 2 - px(4) : 0
         }
-        if language == "json" {
-            return jsonRuns(source)
-        }
-        return [
-            AppKitPlan.InlineRun(
-                text: source,
-                traits: [],
-                link: nil,
-                color: nil
-            )
-        ]
-    }
 
-    private static func jsonRuns(_ source: String) -> [AppKitPlan.InlineRun] {
-        var output: [AppKitPlan.InlineRun] = []
-        var cursor = source.startIndex
-        while cursor < source.endIndex {
-            if source[cursor] == "\"" {
-                var end = source.index(after: cursor)
-                var escaped = false
-                while end < source.endIndex {
-                    if source[end] == "\"", !escaped {
-                        end = source.index(after: end)
-                        break
-                    }
-                    escaped = source[end] == "\\" && !escaped
-                    if source[end] != "\\" {
-                        escaped = false
-                    }
-                    end = source.index(after: end)
-                }
-                output.append(
-                    AppKitPlan.InlineRun(
-                        text: String(source[cursor ..< end]),
-                        traits: [],
-                        link: nil,
-                        color: jsonStringColor(
-                            in: source,
-                            after: end
-                        )
-                    )
-                )
-                cursor = end
-                continue
-            }
-            if source[cursor].isNumber || source[cursor] == "-" {
-                var end = source.index(after: cursor)
-                while end < source.endIndex,
-                      source[end].isNumber || ".eE+-".contains(source[end])
-                {
-                    end = source.index(after: end)
-                }
-                output.append(
-                    AppKitPlan.InlineRun(
-                        text: String(source[cursor ..< end]),
-                        traits: [],
-                        link: nil,
-                        color: .jsonNumber
-                    )
-                )
-                cursor = end
-                continue
-            }
-            let tail = source[cursor...]
-            if let keyword = ["true", "false", "null"].first(
-                where: { tail.hasPrefix($0) }
-            ) {
-                output.append(
-                    AppKitPlan.InlineRun(
-                        text: keyword,
-                        traits: [],
-                        link: nil,
-                        color: .jsonKeyword
-                    )
-                )
-                cursor = source.index(cursor, offsetBy: keyword.count)
-                continue
-            }
-
-            var end = source.index(after: cursor)
-            while end < source.endIndex,
-                  source[end] != "\"",
-                  !source[end].isNumber,
-                  !source[end...].hasPrefix("true"),
-                  !source[end...].hasPrefix("false"),
-                  !source[end...].hasPrefix("null")
-            {
-                end = source.index(after: end)
-            }
-            output.append(
-                AppKitPlan.InlineRun(
-                    text: String(source[cursor ..< end]),
-                    traits: [],
-                    link: nil,
-                    color: nil
-                )
-            )
-            cursor = end
+        init(
+            baseFontSize: CGFloat, usesMessageLineHeight: Bool, reservesCodeCopyButton: Bool,
+            codeAppearance: NSAppearance?
+        ) {
+            self.baseFontSize = baseFontSize
+            self.reservesCodeCopyButton = reservesCodeCopyButton
+            self.codeAppearance = codeAppearance
+            let font = NSFont.systemFont(ofSize: baseFontSize)
+            bodyLineHeight = usesMessageLineHeight ? baseFontSize / 16 * 22 : 0
+            emptyLineHeight = usesMessageLineHeight
+                ? bodyLineHeight
+                : ceil(font.ascender - font.descender + font.leading) + 1
+            orderedMarkerFont = .monospacedDigitSystemFont(ofSize: baseFontSize, weight: .regular)
         }
-        return output
-    }
 
-    private static func jsonStringColor(
-        in source: String,
-        after stringEnd: String.Index
-    ) -> AppKitPlan.SemanticColor {
-        var lookahead = stringEnd
-        while lookahead < source.endIndex,
-              source[lookahead].isWhitespace
-        {
-            lookahead = source.index(after: lookahead)
+        func px(_ value: CGFloat) -> CGFloat { value * em }
+
+        /// Tabular digits make a number's width follow its length, so the
+        /// longest marker in a list is also the widest.
+        let orderedMarkerFont: NSFont
+
+        /// CSS margins: headings 16 above (8 when first) and 8 below, lists
+        /// 4 around every item, code blocks 6 above their border.
+        func margins(_ line: AppKitPlan.Line, isFirst: Bool) -> (top: CGFloat, bottom: CGFloat) {
+            switch line.block {
+            case .heading: (px(isFirst ? 8 : 16), px(8))
+            case .listItem: (px(4), px(4))
+            case .code: (px(6), 0)
+            case .paragraph, .subtext: (0, 0)
+            }
         }
-        return lookahead < source.endIndex && source[lookahead] == ":"
-            ? .jsonKey
-            : .jsonString
+
+        /// Space above a line: adjacent margins collapse as in CSS, quotes
+        /// add 4 around themselves, and code text sits inside its padding.
+        func spacingBefore(_ index: Int, in lines: [AppKitPlan.Line]) -> CGFloat {
+            let line = lines[index]
+            let isFirstCodeLine = if case .code(_, true) = line.block { true } else { false }
+            let codeTop = isFirstCodeLine ? codeInset : 0
+            guard index > 0 else {
+                return max(margins(line, isFirst: true).top, line.isQuoted ? px(4) : 0) + codeTop
+            }
+            let previous = lines[index - 1]
+            let quoteMargin = previous.isQuoted != line.isQuoted ? px(4) : 0
+            if case .code = previous.block {
+                if case .code(_, false) = line.block { return 0 }
+                return codeInset + emptyLineHeight + max(margins(line, isFirst: false).top, quoteMargin) + codeTop
+            }
+            return max(
+                margins(previous, isFirst: false).bottom,
+                margins(line, isFirst: false).top,
+                quoteMargin
+            ) + codeTop
+        }
     }
 
     private static func appKitFont(
         block: AppKitPlan.Block,
         traits: AppKitPlan.InlineTraits,
-        baseFontSize: CGFloat
+        metrics: BlockMetrics
     ) -> NSFont {
-        let size: CGFloat
-        let defaultWeight: NSFont.Weight
-        switch block {
-        case let .heading(level):
-            switch level {
-            case 1:
-                size = max(baseFontSize, 24)
-                defaultWeight = .bold
-            case 2:
-                size = max(baseFontSize, 20)
-                defaultWeight = .bold
-            default:
-                size = max(baseFontSize, 16)
-                defaultWeight = .semibold
-            }
-        case .subtext:
-            size = min(baseFontSize, 12)
-            defaultWeight = .regular
-        case .code:
-            size = min(baseFontSize, 14)
-            defaultWeight = .regular
-        default:
-            size = baseFontSize
-            defaultWeight = traits.contains(.bold) ? .semibold : .regular
+        let base = metrics.baseFontSize
+        let (size, defaultWeight): (CGFloat, NSFont.Weight) = switch block {
+        case .heading(1): (base * 1.5, .bold)
+        case .heading(2): (base * 1.25, .bold)
+        case .heading: (base, .bold)
+        case .subtext, .code: (base * 0.875, .regular)
+        case .paragraph, .listItem: (base, traits.contains(.bold) ? .semibold : .regular)
         }
 
         var font = if case .code = block {
@@ -1175,7 +1198,7 @@ public enum DiscordMarkdown {
             )
         } else if traits.contains(.inlineCode) {
             NSFont.monospacedSystemFont(
-                ofSize: size,
+                ofSize: size * 0.85,
                 weight: traits.contains(.bold) ? .semibold : .regular
             )
         } else {
@@ -1193,146 +1216,403 @@ public enum DiscordMarkdown {
         return font
     }
 
+    /// Discord's dark-theme code colours, each with a darker variant that
+    /// keeps 4.5:1 contrast on the translucent code fill over the lightest
+    /// and dimmest light-appearance backgrounds, bubbles included.
+    private enum CodePalette {
+        static let jsonKey = color(dark: 0x4FA1FA, light: 0x0A5AB4)
+        static let jsonString = color(dark: 0xA3D187, light: 0x1A6A35)
+        static let jsonNumber = color(dark: 0xF08F4F, light: 0x9A4100)
+        static let jsonKeyword = color(dark: 0x73B8F5, light: 0x0A5AB4)
+        static let keyword = color(dark: 0xF67774, light: 0xA8302A)
+        static let title = color(dark: 0x8195FB, light: 0x3F4FC0)
+        static let string = color(dark: 0x57AF74, light: 0x1A6A35)
+        static let number = color(dark: 0xE18752, light: 0x9A4100)
+        static let `operator` = color(dark: 0xFC8884, light: 0xA8302A)
+        static let comment = color(dark: 0x888991, light: 0x5C5E66)
+
+        private static func color(dark: UInt32, light: UInt32) -> NSColor {
+            let dark = srgb(dark)
+            let light = srgb(light)
+            return NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
+        }
+
+        private static func srgb(_ hex: UInt32) -> NSColor {
+            NSColor(
+                srgbRed: CGFloat(hex >> 16 & 0xFF) / 255,
+                green: CGFloat(hex >> 8 & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255,
+                alpha: 1
+            )
+        }
+    }
+
     private static func foregroundColor(
-        block: AppKitPlan.Block,
+        for line: AppKitPlan.Line,
         semanticColor: AppKitPlan.SemanticColor?
     ) -> NSColor {
         switch semanticColor {
-        case .jsonKey: NSColor(
-            red: 0.31,
-            green: 0.63,
-            blue: 0.98,
-            alpha: 1
-        )
-        case .jsonString: NSColor(
-            red: 0.64,
-            green: 0.82,
-            blue: 0.53,
-            alpha: 1
-        )
-        case .jsonNumber: NSColor(
-            red: 0.94,
-            green: 0.56,
-            blue: 0.31,
-            alpha: 1
-        )
-        case .jsonKeyword: NSColor(red: 0.45, green: 0.72, blue: 0.96, alpha: 1)
+        case .jsonKey: CodePalette.jsonKey
+        case .jsonString: CodePalette.jsonString
+        case .jsonNumber: CodePalette.jsonNumber
+        case .jsonKeyword: CodePalette.jsonKeyword
+        case .codeKeyword: CodePalette.keyword
+        case .codeTitle: CodePalette.title
+        case .codeString: CodePalette.string
+        case .codeNumber: CodePalette.number
+        case .codeOperator: CodePalette.operator
+        case .codeComment: CodePalette.comment
         case nil:
-            if case .subtext = block {
-                NSColor.secondaryLabelColor
-            } else {
-                NSColor.labelColor
+            switch line.block {
+            case .subtext: NSColor.secondaryLabelColor
+            case .heading: NSColor.labelColor
+            // Quoted text, apart from headings, is slightly muted.
+            default: line.isQuoted ? quotedTextColor : NSColor.labelColor
             }
         }
     }
 
-    private static func isCodeBlock(
-        _ line: AppKitPlan.Line
-    ) -> Bool {
-        if case .code = line.block {
-            return true
-        }
-        return false
-    }
-
-    private static func isListBlock(
-        _ line: AppKitPlan.Line
-    ) -> Bool {
-        switch line.block {
-        case .unorderedList, .orderedList:
-            true
-        default:
-            false
-        }
-    }
-
-    private static func isSameListBlock(
-        _ lhs: AppKitPlan.Line,
-        _ rhs: AppKitPlan.Line
-    ) -> Bool {
-        switch (lhs.block, rhs.block) {
-        case (.unorderedList, .unorderedList),
-             (.orderedList, .orderedList):
-            true
-        default:
-            false
-        }
-    }
-
-    private static func isInlineCodeOnlyLine(
-        _ line: AppKitPlan.Line
-    ) -> Bool {
-        guard case .paragraph = line.block,
-              !line.runs.isEmpty
-        else {
-            return false
-        }
-        return line.runs.allSatisfy {
-            $0.traits.contains(.inlineCode)
-        }
+    /// Label color at 0.7 alpha. Resolved per appearance when drawn, so a
+    /// quote built in one appearance stays readable in the other.
+    private static let quotedTextColor = NSColor(name: nil) { appearance in
+        NSColor(
+            white: appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0,
+            alpha: 0.7
+        )
     }
 
     private static func paragraphStyle(
-        for block: AppKitPlan.Block,
-        startsListBlock: Bool,
-        startsInlineCodeLine: Bool,
-        startsCodeBlock: Bool,
-        endsCodeBlock: Bool
+        for line: AppKitPlan.Line,
+        index: Int,
+        in lines: [AppKitPlan.Line],
+        metrics: BlockMetrics
     ) -> NSParagraphStyle {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 1
-        switch block {
-        case .heading:
-            paragraph.paragraphSpacingBefore = 4
-            paragraph.paragraphSpacing = 2
+        // Discord's message lines sit one line height apart; elsewhere the
+        // natural line gets a point of leading.
+        paragraph.lineSpacing = metrics.bodyLineHeight > 0 ? 0 : 1
+        paragraph.paragraphSpacingBefore = metrics.spacingBefore(index, in: lines)
+        let indent = line.isQuoted ? metrics.quoteIndent : 0
+        paragraph.firstLineHeadIndent = indent
+        paragraph.headIndent = indent
+        switch line.block {
         case .subtext:
             paragraph.lineSpacing = 0
-        case .quote:
-            paragraph.firstLineHeadIndent = 12
-            paragraph.headIndent = 12
-        case .unorderedList, .orderedList:
-            paragraph.firstLineHeadIndent = 2
-            paragraph.headIndent = 20
-            paragraph.minimumLineHeight = 26
-            paragraph.maximumLineHeight = 26
-            paragraph.paragraphSpacingBefore =
-                startsListBlock ? 4 : 0
-        case .code:
-            paragraph.firstLineHeadIndent = 8
-            paragraph.headIndent = 8
-            paragraph.tailIndent = -8
-            paragraph.minimumLineHeight = 18
-            paragraph.maximumLineHeight = 18
-            paragraph.paragraphSpacingBefore =
-                startsCodeBlock ? 17 : 0
-            paragraph.paragraphSpacing =
-                endsCodeBlock ? 4 : 0
+        case let .listItem(level, isOrdered):
+            // Discord hangs wide numbers into the message margin; Core Text
+            // cannot draw left of its frame, so the gutter grows instead.
+            let markerWidth = isOrdered
+                ? (line.widestMarker as NSString).size(withAttributes: [.font: metrics.orderedMarkerFont]).width
+                : 0
+            let gutter = max(metrics.listIndent, ceil(markerWidth) + metrics.orderedMarkerGap)
+            let textIndent = indent + metrics.listIndent * CGFloat(level) + gutter
+            paragraph.minimumLineHeight = metrics.bodyLineHeight
+            paragraph.firstLineHeadIndent = textIndent - gutter
+            paragraph.headIndent = textIndent
+            paragraph.tabStops = (isOrdered
+                ? [NSTextTab(textAlignment: .right, location: textIndent - metrics.orderedMarkerGap)]
+                : []) + [NSTextTab(textAlignment: .left, location: textIndent)]
+        case let .code(_, isFirstLine):
+            paragraph.lineSpacing = 0
+            paragraph.firstLineHeadIndent = metrics.codeInset
+            paragraph.headIndent = metrics.codeInset
+            // The copy button's square reaches into a block's second line,
+            // so both of its first lines end before it.
+            let isSecondLine = if index > 0, case .code(_, true) = lines[index - 1].block { true } else { false }
+            paragraph.tailIndent = -metrics.codeInset - (isFirstLine || isSecondLine ? metrics.codeCopyButtonReserve : 0)
+            // Discord sets code left to right in any script, which also keeps
+            // that room at the end the button sits on.
+            paragraph.baseWritingDirection = .leftToRight
+            paragraph.minimumLineHeight = metrics.codeLineHeight
+            paragraph.maximumLineHeight = metrics.codeLineHeight
         case .paragraph:
-            paragraph.paragraphSpacingBefore =
-                startsInlineCodeLine ? 5 : 0
+            paragraph.minimumLineHeight = metrics.bodyLineHeight
+        case .heading:
+            // Discord's headings keep its 1.375 line height at their own size.
+            paragraph.minimumLineHeight = appKitFont(block: line.block, traits: [], metrics: metrics).pointSize * 1.375
+        }
+        // Inline code that opens a line has no preceding character to pad,
+        // so the line itself starts inside the code's border.
+        if line.runs.first?.traits.contains(.inlineCode) == true {
+            let font = appKitFont(block: line.block, traits: .inlineCode, metrics: metrics)
+            paragraph.firstLineHeadIndent += inlineCodePadding(font: font)
         }
         return paragraph
     }
+}
 
-    private static func blankParagraphStyle() -> NSParagraphStyle {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = 26
-        paragraph.maximumLineHeight = 26
-        return paragraph
+extension DiscordMarkdown {
+    /// Literal code ranges use the same delimiter rules as message rendering.
+    static func sourceCodeRanges(_ source: String) -> [NSRange] {
+        guard source.utf8.contains(96) else { return [] }
+        var source = source
+        source.makeContiguousUTF8()
+        var ranges: [NSRange] = []
+        let collector = SourceFormatCollector(source: source, matchesComposerDelimiters: false) { range, traits, _ in
+            if traits.contains(.inlineCode) { ranges.append(NSRange(range, in: source)) }
+        }
+        var inCodeFence = false
+        var inMultilineQuote = false
+        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("```") {
+                inCodeFence.toggle()
+                ranges.append(NSRange(line.startIndex ..< line.endIndex, in: source))
+            } else if inCodeFence {
+                ranges.append(NSRange(line.startIndex ..< line.endIndex, in: source))
+            } else {
+                if line.isEmpty { inMultilineQuote = false }
+                // planLine removes a list marker before parsing inline syntax;
+                // multiline quote continuations instead retain their whole line.
+                let content = line.hasPrefix("* ") && !inMultilineQuote ? line.dropFirst(2) : line
+                _ = inlineRuns(content, inheritedTraits: [], inheritedLink: nil, sourceCollector: collector)
+                if line.hasPrefix(">>> ") { inMultilineQuote = true }
+            }
+        }
+        return ranges
+    }
+}
+
+public extension DiscordMarkdown {
+    /// `source` as an editor whose document stays Markdown shows it: every
+    /// character kept, set in the fonts, colours and block metrics message
+    /// rendering gives it. Its syntax is dimmed and marked with
+    /// `discordMarkdownSyntax`, so an editor can hide it outside the span
+    /// the caret is in. Plain paragraphs keep `attributes`, the editor's own
+    /// style. A colour other than the label colour, as on an outgoing
+    /// bubble, colours all of the text.
+    static func appKitSourceAttributed(
+        _ source: String,
+        attributes: [NSAttributedString.Key: Any],
+        baseFontSize: CGFloat,
+        usesMessageLineHeight: Bool
+    ) -> NSMutableAttributedString {
+        var source = source
+        source.makeContiguousUTF8()
+        let text = NSMutableAttributedString(string: source, attributes: attributes)
+        // No styled syntax can begin without one of these ASCII markers.
+        guard source.utf8.contains(where: { "*_~|`[#><".utf8.contains($0) }) else { return text }
+        // A message's code blocks keep room for the timeline's copy button.
+        SourceStyler(source: source, text: text, attributes: attributes, metrics: BlockMetrics(
+            baseFontSize: baseFontSize, usesMessageLineHeight: usesMessageLineHeight,
+            reservesCodeCopyButton: usesMessageLineHeight, codeAppearance: nil
+        )).run()
+        return text
     }
 
-    private static func blockAttribute(
-        for block: AppKitPlan.Block
-    ) -> NSString? {
-        switch block {
-        case .quote: "quote"
-        case .code: "code"
-        default: nil
+    /// Styles a draft's source line by line with message rendering's own
+    /// line reading, inline collector and metrics.
+    private final class SourceStyler {
+        let source: String
+        let text: NSMutableAttributedString
+        let metrics: BlockMetrics
+        let plainParagraph: NSParagraphStyle
+        let textColor: NSColor?
+        let syntaxColor: NSColor
+        /// The message's lines so far; fences are not lines once rendered.
+        var lines: [AppKitPlan.Line] = []
+        var line = AppKitPlan.Line(runs: [], block: .paragraph)
+        var linkLabel: NSRange?
+        var fences: [NSRange] = []
+        /// Whether the previous source line was code, inside a fence.
+        var followsCode = false
+        /// The room a closing fence keeps for its block's bottom padding,
+        /// which the next line's spacing then leaves out.
+        var closingFenceHeight: CGFloat = 0
+
+        init(source: String, text: NSMutableAttributedString, attributes: [NSAttributedString.Key: Any], metrics: BlockMetrics) {
+            self.source = source
+            self.text = text
+            self.metrics = metrics
+            plainParagraph = attributes[.paragraphStyle] as? NSParagraphStyle ?? .default
+            textColor = (attributes[.foregroundColor] as? NSColor).flatMap { $0 == .labelColor ? nil : $0 }
+            syntaxColor = textColor?.withAlphaComponent(0.72) ?? .secondaryLabelColor
+        }
+
+        func run() {
+            // Delimiters pair as the composer's formatting does, nesting as
+            // Discord does. Formats arrive parents first, so a nested format's
+            // traits replace its parent's, and its delimiters are marked after
+            // the parent's content.
+            let collector = SourceFormatCollector(source: source) { [self] range, traits, delimiter in
+                let content = NSRange(range, in: source)
+                let width = delimiter.utf16.count
+                let span = NSRange(location: content.location - width, length: content.length + 2 * width)
+                style(content, as: traits)
+                markSyntax(NSRange(location: span.location, length: width), of: span)
+                markSyntax(NSRange(location: NSMaxRange(content), length: width), of: span)
+            }
+            collector.collectLink = { [self] label, end in
+                let labelRange = NSRange(label, in: source)
+                let span = NSRange(source.index(before: label.lowerBound) ..< end, in: source)
+                linkLabel = labelRange
+                text.addAttribute(.foregroundColor, value: NSColor.linkColor, range: labelRange)
+                markSyntax(NSRange(location: span.location, length: 1), of: span)
+                markSyntax(NSRange(location: NSMaxRange(labelRange), length: NSMaxRange(span) - NSMaxRange(labelRange)), of: span)
+            }
+            // Until its closing fence is typed, a code block is plain text, as
+            // Discord shows it: the open fence literal and the lines after it
+            // as text.
+            var openFence: String.Index?
+            for line in source.split(separator: "\n", omittingEmptySubsequences: false) where line.hasPrefix("```") {
+                openFence = openFence == nil ? line.startIndex : nil
+            }
+            forEachSourceLine(source) { rawLine, kind in
+                guard let openFence, rawLine.startIndex >= openFence else {
+                    return styleLine(rawLine, kind: kind, collector: collector)
+                }
+                styleLine(rawLine, kind: .text(rawLine, isQuoted: false), collector: collector, isLiteral: rawLine.startIndex == openFence)
+            }
+            for fence in fences {
+                markSyntax(fence, of: fence)
+            }
+            if let textColor {
+                text.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+                    if value as? NSColor !== syntaxColor { text.addAttribute(.foregroundColor, value: textColor, range: range) }
+                }
+            }
+        }
+
+        /// A literal line is a plain paragraph with no syntax, as an open fence is.
+        private func styleLine(_ rawLine: Substring, kind: SourceLine, collector: SourceFormatCollector, isLiteral: Bool = false) {
+            let range = NSRange(rawLine.startIndex ..< rawLine.endIndex, in: source)
+            // A paragraph's newline carries its paragraph's attributes.
+            let paragraphRange = NSRange(location: range.location, length: min(range.length + 1, text.length - range.location))
+            defer { followsCode = if case .code = kind { true } else { false } }
+            switch kind {
+            case let .fence(opening):
+                fences.append(range)
+                text.addAttribute(.font, value: appKitFont(block: .code(language: nil, isFirstLine: false), traits: [], metrics: metrics), range: range)
+                // Hidden, a fence's line takes no room; message rendering
+                // has no line for it.
+                text.addAttribute(.discordMarkdownBlock, value: "fence" as NSString, range: paragraphRange)
+                // Shown, a closing fence sits below its block's padding; an
+                // empty block has none.
+                guard opening == nil, followsCode else { return }
+                closingFenceHeight = metrics.codeInset
+                setParagraph(spacing: closingFenceHeight, for: paragraphRange)
+                return
+            case let .code(language, isFirstLine):
+                line = AppKitPlan.Line(runs: codeRuns(String(rawLine), language: language), block: .code(language: language, isFirstLine: isFirstLine))
+                style(range)
+                var location = range.location
+                for run in line.runs {
+                    let length = run.text.utf16.count
+                    if run.color != nil { style(NSRange(location: location, length: length), color: run.color) }
+                    location += length
+                }
+            case .text where isLiteral:
+                line = AppKitPlan.Line(runs: [], block: .paragraph)
+            case let .text(content, isQuoted):
+                let item = listItemContent(content)
+                let prefix = item == nil ? blockPrefixes.first(where: { content.hasPrefix($0.prefix) }) : nil
+                let body = item?.content ?? content.dropFirst(prefix?.prefix.count ?? 0)
+                line = AppKitPlan.Line(runs: [], block: prefix?.block ?? .paragraph, isQuoted: isQuoted)
+                if line.block != .paragraph || isQuoted { style(range) }
+                // A list's marker reads as itself rather than as syntax.
+                let syntax = NSRange(rawLine.startIndex ..< (item == nil ? body : content).startIndex, in: source)
+                if syntax.length > 0 { markSyntax(syntax, of: syntax) }
+                _ = inlineRuns(body, inheritedTraits: [], inheritedLink: nil, sourceCollector: collector)
+            }
+            lines.append(line)
+            let spacing = metrics.spacingBefore(lines.count - 1, in: lines) - closingFenceHeight
+            closingFenceHeight = 0
+            let codeIndent = padInlineCode(in: range)
+            if line.block == .paragraph, !line.isQuoted {
+                setParagraph(spacing: spacing, firstLineIndent: codeIndent, for: paragraphRange)
+            } else {
+                let base = paragraphStyle(for: line, index: lines.count - 1, in: lines, metrics: metrics)
+                setParagraph(base: base, spacing: spacing, firstLineIndent: codeIndent, for: paragraphRange)
+            }
+            if let blockName = blockName(for: line) {
+                text.addAttributes([.discordMarkdownBlock: blockName, .discordMarkdownEm: NSNumber(value: metrics.em)], range: paragraphRange)
+            }
+        }
+
+        private func style(_ range: NSRange, as traits: AppKitPlan.InlineTraits = [], color: AppKitPlan.SemanticColor? = nil) {
+            let run = AppKitPlan.InlineRun(text: "", traits: traits, link: nil, color: color)
+            text.addAttributes(attributes(for: run, in: line, metrics: metrics), range: range)
+            // A format inside a link's label, which arrives right after the
+            // link, keeps the link's colour.
+            if let linkLabel, NSIntersectionRange(linkLabel, range).length > 0 {
+                text.addAttribute(.foregroundColor, value: NSColor.linkColor, range: NSIntersectionRange(linkLabel, range))
+            }
+        }
+
+        /// Each syntax character records its place in `span`, which stays
+        /// the same as text before or after the span changes.
+        private func markSyntax(_ range: NSRange, of span: NSRange) {
+            text.addAttribute(.foregroundColor, value: syntaxColor, range: range)
+            for index in range.location ..< NSMaxRange(range) {
+                let place = NSRange(location: index - span.location, length: span.length)
+                text.addAttribute(.discordMarkdownSyntax, value: NSValue(range: place), range: NSRange(location: index, length: 1))
+            }
+        }
+
+        /// Sets `base`, or the plain style the text already has, with the
+        /// line's spacing before it and its code indent.
+        private func setParagraph(base: NSParagraphStyle? = nil, spacing: CGFloat, firstLineIndent: CGFloat = 0, for range: NSRange) {
+            guard base != nil || spacing != 0 || firstLineIndent != 0 else { return }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.setParagraphStyle(base ?? plainParagraph)
+            paragraph.paragraphSpacingBefore = spacing
+            paragraph.firstLineHeadIndent += firstLineIndent
+            text.addAttribute(.paragraphStyle, value: paragraph, range: range)
+        }
+
+        /// Pads the line's inline code as message rendering does: after its
+        /// last character, and before it on the last character shown ahead
+        /// of it, since hidden syntax takes no room, or, when nothing is
+        /// shown ahead of it on the line, by the indent returned.
+        private func padInlineCode(in line: NSRange) -> CGFloat {
+            var indent: CGFloat = 0
+            let string = text.string as NSString
+            text.enumerateAttribute(.discordMarkdownInlineCode, in: line) { value, range, _ in
+                guard value != nil, let font = text.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont else { return }
+                let padding = inlineCodePadding(font: font)
+                text.addAttribute(.kern, value: padding, range: string.rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1))
+                var previous = range.location - 1
+                while previous >= line.location, text.attribute(.discordMarkdownSyntax, at: previous, effectiveRange: nil) != nil {
+                    previous -= 1
+                }
+                if previous < line.location {
+                    indent = padding
+                } else {
+                    text.addAttribute(.kern, value: padding, range: string.rangeOfComposedCharacterSequence(at: previous))
+                }
+            }
+            return indent
         }
     }
 }
 
+public extension DiscordMarkdown {
+    /// Source that renders `text` literally: every ASCII punctuation mark is
+    /// escaped, so no markdown, mention or emoji syntax survives. Bare URLs
+    /// still link, as plain text does.
+    static func escaped(_ text: String) -> String {
+        text.reduce(into: "") { output, character in
+            if character.isASCII, character.isPunctuation || character.isSymbol { output.append("\\") }
+            output.append(character)
+        }
+    }
+}
+
+public extension DiscordMarkdown.AppKitPlan.Line {
+    /// Headings keep their size where Discord shrinks the rest of the text,
+    /// as inside a Components V2 container.
+    var isHeading: Bool {
+        if case .heading = block { true } else { false }
+    }
+}
+
 private extension DiscordMarkdown {
+    static func inlineCodeRun(
+        _ source: Substring, traits: AppKitPlan.InlineTraits, link: URL?, sourceCollector: SourceFormatCollector?
+    ) -> AppKitPlan.InlineRun {
+        sourceCollector?.collect(source.startIndex ..< source.endIndex, traits.union(.inlineCode), "`")
+        return AppKitPlan.InlineRun(text: String(source), traits: traits.union(.inlineCode), link: link, color: nil)
+    }
+
     static func isComposerSyntaxCharacter(_ character: Character) -> Bool {
         switch character {
         case "\\", "`", "[", "<", "*", "_", "~", "|", "h": true
@@ -1351,16 +1631,22 @@ private extension DiscordMarkdown {
         let label: Range<String.Index>
         let url: URL
         let end: String.Index
+        /// Written as [label](<url>), which Discord never previews.
+        var suppressesPreview = false
     }
 
     /// Per-parse lookup table: unfinished syntax must not repeatedly search the
     /// remainder of the draft for the same closing bracket or backtick.
     final class SourceFormatCollector {
         let collect: (Range<String.Index>, AppKitPlan.InlineTraits, String) -> Void
+        /// A masked link's label and the end of its target.
+        var collectLink: ((Range<String.Index>, String.Index) -> Void)?
+        let matchesComposerDelimiters: Bool
         private var terminators: [Character: [String.Index]] = [:]
 
-        init(source: String, collect: @escaping (Range<String.Index>, AppKitPlan.InlineTraits, String) -> Void) {
+        init(source: String, matchesComposerDelimiters: Bool = true, collect: @escaping (Range<String.Index>, AppKitPlan.InlineTraits, String) -> Void) {
             self.collect = collect
+            self.matchesComposerDelimiters = matchesComposerDelimiters
             for index in source.indices {
                 let character = source[index]
                 switch character {
@@ -1490,7 +1776,7 @@ public extension DiscordMarkdown {
                     lineIndex << 32 | $0
                 }
             }
-            lines[lineIndex] = AppKitPlan.Line(runs: runs, block: lines[lineIndex].block)
+            lines[lineIndex].runs = runs
         }
         return lines
     }
@@ -1523,15 +1809,18 @@ public extension DiscordMarkdown {
         return result
     }
 
-    /// A rendered link and whether all of its text is inside one spoiler.
+    /// A rendered link, whether all of its text is inside one spoiler, and
+    /// whether it was written as <…>, which Discord never previews.
     struct LinkOccurrence: Hashable, Sendable {
         public let url: URL
         public let isSpoiler: Bool
+        public let suppressesPreview: Bool
     }
 
     /// The links message rendering produces, in document order, with the
     /// spoiler state it gives them. Consecutive runs of one link are one
-    /// occurrence, so adjacent links to the same URL merge.
+    /// occurrence, so adjacent links to the same URL merge, unless one was
+    /// written as <…> and the other not: those are two links.
     static func linkOccurrences(_ source: String) -> [LinkOccurrence] {
         var result: [LinkOccurrence] = []
         for line in appKitPlan(source).lines {
@@ -1540,14 +1829,16 @@ public extension DiscordMarkdown {
                 defer { previous = run }
                 guard let link = run.link else { continue }
                 let isSpoiler = run.traits.contains(.spoiler)
-                if link == previous?.link, let last = result.popLast() {
+                if link == previous?.link, run.suppressesPreview == previous?.suppressesPreview,
+                   let last = result.popLast() {
                     result.append(LinkOccurrence(
                         url: link,
                         isSpoiler: last.isSpoiler && isSpoiler
-                            && run.spoilerID == previous?.spoilerID
+                            && run.spoilerID == previous?.spoilerID,
+                        suppressesPreview: run.suppressesPreview
                     ))
                 } else {
-                    result.append(LinkOccurrence(url: link, isSpoiler: isSpoiler))
+                    result.append(LinkOccurrence(url: link, isSpoiler: isSpoiler, suppressesPreview: run.suppressesPreview))
                 }
             }
         }

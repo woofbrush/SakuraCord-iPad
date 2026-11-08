@@ -17,10 +17,12 @@ struct SakuraCordApp: App {
         _ = NSApplication.shared
         ComposerPromisedFileStorage.removeAbandonedFilesAtStartup()
         SharedMediaDataLoader.removeAbandonedDownloadsAtStartup()
+        MediaViewerPreviewFile.removeAbandonedFilesAtStartup()
         DiagnosticsPreferences.restore()
         let configuration = AppLaunchConfiguration(arguments: ProcessInfo.processInfo.arguments)
         let mockProvider = configuration.mode == .offlineTesting ? MockChatProvider() : nil
         appDelegate = AppDelegate()
+        let notificationPreferences = NotificationPreferences()
         let appModel = AppModel(
             launchMode: configuration.mode,
             awaitsOfflineSignIn: configuration.includesSignInFixture,
@@ -30,11 +32,14 @@ struct SakuraCordApp: App {
             notificationService: MacNativeNotificationService(
                 deliversNotifications: configuration.mode != .offlineTesting
             ),
-            soundPlayer: configuration.mode == .offlineTesting ? NoopAppSoundPlayer() : MacAppSoundPlayer()
+            soundPlayer: configuration.mode == .offlineTesting
+                ? NoopAppSoundPlayer() : MacAppSoundPlayer(notificationPreferences: notificationPreferences),
+            notificationPreferences: notificationPreferences
         )
-        appModel.showInspector = GeneralWindowRestorationStore.shared.memberListIsVisible
+        appModel.inspectorVisibility = GeneralWindowRestorationStore.shared.loadInspectorVisibility()
         AppAppearanceController.shared.apply(appModel.appearanceSettings.colorScheme)
         InterfaceScale.shared.update(appModel.appearanceSettings.interfaceSize)
+        FileTypeIconCache.prewarm()
         _model = State(initialValue: appModel)
         UNUserNotificationCenter.current().delegate = appDelegate.notificationCenterDelegate
         NSApp.textKeyEquivalentHandler = { [weak appModel] event in

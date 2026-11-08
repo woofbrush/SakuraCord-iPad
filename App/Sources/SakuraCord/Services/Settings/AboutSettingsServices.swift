@@ -9,10 +9,17 @@ nonisolated struct AboutVersionInformation: Equatable, Sendable {
             infoDictionary["CFBundleShortVersionString"],
             allowsSpaces: false
         )
-        displayVersion = Self.sanitizedBundleValue(
+        let releaseDisplay = Self.sanitizedBundleValue(
             infoDictionary["SakuraCordReleaseDisplayVersion"],
             allowsSpaces: true
         ) ?? semanticVersion
+        if infoDictionary["SakuraCordPullRequestBuildID"] != nil,
+           let number = infoDictionary["SakuraCordPullRequestNumber"] as? Int,
+           let sha = Self.sanitizedBundleValue(infoDictionary["SakuraCordBuildHeadSHA"], allowsSpaces: false) {
+            displayVersion = "\(releaseDisplay ?? "Development") PR \(number) \(sha.prefix(7))"
+        } else {
+            displayVersion = releaseDisplay
+        }
     }
 
     init(bundle: Bundle = .main) {
@@ -153,7 +160,7 @@ nonisolated struct AboutReleaseNotes: Decodable, Equatable, Identifiable, Sendab
 
         self.releaseVersion = releaseVersion
         self.announcementHeadline = announcementHeadline
-        renderedGithubDescription = AboutMarkdownRenderer.render(githubDescription)
+        renderedGithubDescription = MarkdownDocumentText.parse(githubDescription)
     }
 
     private static func headline(
@@ -189,18 +196,7 @@ nonisolated struct AboutAcknowledgement: Equatable, Identifiable, Sendable {
     init(title: String, markdown: String) {
         self.title = title
         self.markdown = markdown
-        renderedMarkdown = AboutMarkdownRenderer.render(markdown)
-    }
-}
-
-nonisolated enum AboutMarkdownRenderer {
-    static func render(_ markdown: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
-            failurePolicy: .returnPartiallyParsedIfPossible
-        )
-        return (try? AttributedString(markdown: markdown, options: options))
-            ?? AttributedString(markdown)
+        renderedMarkdown = MarkdownDocumentText.parse(markdown)
     }
 }
 

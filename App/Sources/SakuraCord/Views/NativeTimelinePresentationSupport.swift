@@ -12,6 +12,27 @@ final class NativeTimelineCanvasStorage {
     var contentHeight: CGFloat = 0
 }
 
+/// The canvas's row layouts, with the row being edited inline laid out
+/// around its editor.
+@MainActor
+struct NativeTimelineCanvasLayouts: @MainActor RandomAccessCollection {
+    let storage: NativeTimelineCanvasStorage
+    let editing: NativeTimelineEditingSession
+
+    var startIndex: Int { storage.layouts.startIndex }
+    var endIndex: Int { storage.layouts.endIndex }
+
+    subscript(index: Int) -> NativeTimelineRowLayout {
+        // The edit's row index can trail a storage update until the canvas
+        // reconciles it, so the replacement also has to match the message.
+        if index == editing.rowIndex, let layout = editing.layout,
+           storage.items[index].messageID == editing.messageID {
+            return layout
+        }
+        return storage.layouts[index]
+    }
+}
+
 nonisolated final class NativeTimelineAccessibilityElement:
     NSAccessibilityElement
 {
@@ -118,8 +139,11 @@ nonisolated enum NativeTimelineAccessibilityPresentation {
 
     static func threadLabel(_ thread: MessageThreadSummary) -> String {
         let replyCount = thread.messageCount
-        return "\(thread.name), \(replyCount) "
+        var label = "\(thread.name), \(replyCount) "
             + (replyCount == 1 ? "reply" : "replies")
+        if thread.isArchived { label += ", archived" }
+        if thread.isLocked { label += ", locked" }
+        return label
     }
 
     static func nonblank(_ value: String?) -> String? {
@@ -147,13 +171,6 @@ nonisolated enum NativeTimelineAccessibilityPolicy {
         )
     }
 
-    static func showsMessageBody(
-        messageID: MessageID,
-        editingMessageID: MessageID?
-    ) -> Bool {
-        messageID != editingMessageID
-    }
-
     static func editingOverlayInsertionIndex(
         in rowIdentifiers: [NativeMessageTimelineItem.Identifier],
         editingItemIdentifier: NativeMessageTimelineItem.Identifier?
@@ -167,22 +184,15 @@ nonisolated enum NativeTimelineAccessibilityPolicy {
     }
 }
 
-nonisolated enum NativeTimelineEditingGeometry {
-    static func rowHeight(
-        avatarMaxY: CGFloat?,
-        contentOriginY: CGFloat,
-        contentHeight: CGFloat
-    ) -> CGFloat {
-        max(
-            avatarMaxY ?? 0,
-            contentOriginY + contentHeight + 3
-        )
-    }
-}
-
 struct NativeTimelineComponentRevealKey: Hashable {
     let messageID: MessageID
     let componentID: String
+
+    /// Keyed by the link, as embed IDs are only positions: an edit that
+    /// replaces the link must not inherit the old one's reveal.
+    static func embed(messageID: MessageID, url: URL, occurrence: Int) -> Self {
+        Self(messageID: messageID, componentID: "embed:\(occurrence):\(url.absoluteString)")
+    }
 
     static func attachmentComponentID(_ attachmentID: String) -> String {
         "attachment:\(attachmentID)"
@@ -259,22 +269,79 @@ nonisolated enum NativeTimelineTransientRowGeometry {
 
 @MainActor
 final class NativeTimelineActionCapsuleState: ObservableObject {
-    @Published var isReactionPickerPresented = false {
-        didSet {
-            guard oldValue != isReactionPickerPresented else { return }
-            presentationDidChange?(isPresentationActive)
+    /// The hovered message; the canvas replaces it when the row changes so
+    /// reaction-dependent controls stay current while the capsule is shown.
+    @Published var message: Message
+
+    let controlCount: Int
+    let shiftActionCount: Int
+    let allowsQuickReactions: Bool
+    let isGuildTimedOut: Bool
+    @Published var showsQuickReactions = false
+    @Published private var fitsShiftActions = false
+    @Published var isShiftHeld = false
+    /// Pins the capsule's leading edge instead of its trailing edge, so a
+    /// variant change grows and shrinks the pill away from the clamped side.
+    @Published var pinsLeadingEdge = false
+
+    init(message: Message, controlCount: Int, shiftActionCount: Int, allowsQuickReactions: Bool, isGuildTimedOut: Bool) {
+        self.message = message
+        self.controlCount = controlCount
+        self.shiftActionCount = shiftActionCount
+        self.allowsQuickReactions = allowsQuickReactions
+        self.isGuildTimedOut = isGuildTimedOut
+    }
+
+    var showsShiftActions: Bool {
+        isShiftHeld && fitsShiftActions
+    }
+
+    private var quickReactionPillSize: CGSize {
+        HoverActionPillMetrics.size(
+            controlCount: controlCount + (showsQuickReactions ? QuickReactionPolicy.limit : 0),
+            dividerCount: showsQuickReactions ? 1 : 0
+        )
+    }
+
+    private var shiftPillSize: CGSize {
+        HoverActionPillMetrics.size(controlCount: controlCount + shiftActionCount)
+    }
+
+    var actionSize: CGSize {
+        showsShiftActions ? shiftPillSize : quickReactionPillSize
+    }
+
+    /// Sized for the widest variant, so switching variants animates the
+    /// pill inside a fixed host instead of resizing the host mid-animation.
+    var hostSize: CGSize {
+        let size = quickReactionPillSize
+        guard fitsShiftActions else { return size }
+        return CGSize(width: max(size.width, shiftPillSize.width), height: size.height)
+    }
+
+    func updateAvailableWidth(_ width: CGFloat) {
+        let usableWidth = width - InterfaceScale.metric(16)
+        let showsQuickReactions = allowsQuickReactions
+            && HoverActionPillMetrics.size(controlCount: controlCount + QuickReactionPolicy.limit, dividerCount: 1).width
+            <= usableWidth
+        if self.showsQuickReactions != showsQuickReactions {
+            self.showsQuickReactions = showsQuickReactions
+        }
+        let fitsShiftActions = shiftActionCount > 0 && shiftPillSize.width <= usableWidth
+        if self.fitsShiftActions != fitsShiftActions {
+            self.fitsShiftActions = fitsShiftActions
         }
     }
 
-    @Published var isDeleteConfirmationPresented = false {
+    @Published var isReactionPickerPresented = false {
         didSet {
-            guard oldValue != isDeleteConfirmationPresented else { return }
-            presentationDidChange?(isPresentationActive)
+            guard oldValue != isReactionPickerPresented else { return }
+            presentationDidChange?(isReactionPickerPresented)
         }
     }
 
     var isPresentationActive: Bool {
-        isReactionPickerPresented || isDeleteConfirmationPresented
+        isReactionPickerPresented
     }
 
     var presentationDidChange: ((Bool) -> Void)?
@@ -282,7 +349,6 @@ final class NativeTimelineActionCapsuleState: ObservableObject {
 
 struct NativeTimelineActionCapsuleOverlay: View {
     let model: AppModel
-    let message: Message
     let canEdit: Bool
     let canDelete: Bool
     @ObservedObject var state: NativeTimelineActionCapsuleState
@@ -296,7 +362,10 @@ struct NativeTimelineActionCapsuleOverlay: View {
     let react: (String) -> Void
     let copy: () -> Void
     let copyLink: () -> Void
-    let openThread: (() -> Void)?
+    let copyMessageID: () -> Void
+    let markUnread: () -> Void
+    let togglePin: (() -> Void)?
+    let showMoreActions: () -> Void
     let delete: () -> Void
 
     var body: some View {
@@ -327,12 +396,13 @@ struct NativeTimelineActionCapsuleOverlay: View {
             } else {
                 MessageActionCapsule(
                     model: model,
-                    message: message,
+                    message: state.message,
                     canEdit: canEdit,
                     canDelete: canDelete,
+                    canReact: state.allowsQuickReactions,
+                    showsQuickReactions: state.showsQuickReactions,
+                    showsShiftActions: state.showsShiftActions,
                     isReactionPickerPresented: $state.isReactionPickerPresented,
-                    isDeleteConfirmationPresented:
-                        $state.isDeleteConfirmationPresented,
                     retry: retry,
                     edit: edit,
                     reply: reply,
@@ -340,12 +410,22 @@ struct NativeTimelineActionCapsuleOverlay: View {
                     react: react,
                     copy: copy,
                     copyLink: copyLink,
-                    openThread: openThread,
+                    copyMessageID: copyMessageID,
+                    markUnread: markUnread,
+                    togglePin: togglePin,
+                    showMoreActions: showMoreActions,
                     delete: delete
                 )
             }
         }
         .fixedSize()
+        // The host fits the widest variant; keep the pill against the edge
+        // the canvas anchors so variant changes grow away from it.
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: state.pinsLeadingEdge ? .leading : .trailing
+        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Message actions")
     }
@@ -355,9 +435,29 @@ struct MediaViewerTransitionSource {
     let itemID: String
     let image: NSImage
     let frameInWindow: CGRect
-    let visibleFrameInWindow: CGRect
+    var visibleFrameInWindow: CGRect
     let cornerRadius: CGFloat
     let fillsFrame: Bool
+    /// Whether the timeline leaves the source out while the viewer shows
+    /// it, through the transition link. A source elsewhere, like a
+    /// composer tile, hides itself.
+    var coversSource = true
+}
+
+/// What the timeline shares with the viewer it opens: the timeline keeps the
+/// zoom's sources on its cards' live frames as it scrolls, and leaves out the
+/// card the viewer stands in for.
+@Observable
+final class MediaViewerTransitionLink {
+    var sources: [String: MediaViewerTransitionSource]
+    /// Takes the card the viewer stands in for, if any.
+    @ObservationIgnored var cover: (String?) -> Void = { _ in }
+    /// Runs in the transaction that removes the viewer.
+    @ObservationIgnored var release: () -> Void = {}
+
+    init(sources: [String: MediaViewerTransitionSource]) {
+        self.sources = sources
+    }
 }
 
 struct NativeTimelineMediaViewerPresentation: Identifiable {
@@ -371,7 +471,7 @@ struct NativeTimelineMediaViewerPresentation: Identifiable {
     let authorAvatarURL: URL?
     let timestamp: Date
     let timelinePreviewImages: [String: NSImage]
-    let transitionSources: [String: MediaViewerTransitionSource]
+    let transitionLink: MediaViewerTransitionLink
 
     init(
         id: UUID = UUID(),
@@ -396,7 +496,7 @@ struct NativeTimelineMediaViewerPresentation: Identifiable {
         self.authorAvatarURL = authorAvatarURL
         self.timestamp = timestamp
         self.timelinePreviewImages = timelinePreviewImages
-        self.transitionSources = transitionSources
+        transitionLink = MediaViewerTransitionLink(sources: transitionSources)
     }
 
     func withTimelineMedia(
@@ -418,10 +518,17 @@ struct NativeTimelineMediaViewerPresentation: Identifiable {
         )
     }
 
+    /// The shown item's source when it hides itself rather than being
+    /// covered. The viewer may have paged away from its first item.
+    func uncoveredSourceItemID(showing selectedItemID: String?) -> String? {
+        let id = selectedItemID.flatMap { id in items.contains { $0.id == id } ? id : nil } ?? items[selection].id
+        return transitionLink.sources[id]?.coversSource == false ? id : nil
+    }
+
     func withTransitionSource(
         _ transitionSource: MediaViewerTransitionSource
     ) -> Self {
-        var sources = transitionSources
+        var sources = transitionLink.sources
         sources[transitionSource.itemID] = transitionSource
         return withTimelineMedia(
             previewImages: timelinePreviewImages,
@@ -436,7 +543,7 @@ enum NativeTimelineMediaViewerPlan {
         selectedAttachmentID: UUID,
         author: User
     ) -> NativeTimelineMediaViewerPresentation? {
-        let items = attachments.enumerated().compactMap { index, attachment -> RichMediaItem? in
+        let items = attachments.enumerated().map { index, attachment in
             var optimistic = OptimisticAttachmentPresentation.attachment(
                 for: attachment.url,
                 index: index,
@@ -445,9 +552,6 @@ enum NativeTimelineMediaViewerPlan {
             optimistic.filename = attachment.filename
             optimistic.description = attachment.description
             optimistic.isSpoiler = attachment.isSpoiler
-            guard optimistic.mediaKind == .image
-                    || optimistic.mediaKind == .animatedImage
-            else { return nil }
             return RichMediaItem(optimistic)
         }
         guard let selection = items.firstIndex(where: {
@@ -558,10 +662,7 @@ enum NativeTimelineMediaViewerPlan {
                     isSpoiler: region.isSpoiler,
                     id: region.componentID
                 ) else { return nil }
-                return componentImageFileItem(
-                    region,
-                    message: message
-                )
+                return componentFileItem(region)
             }
             return images + media + files
         }
@@ -637,29 +738,20 @@ enum NativeTimelineMediaViewerPlan {
         )
     }
 
-    private static func componentImageFileItem(
-        _ region: NativeTimelineComponentLayout.FileRegion,
-        message: Message
-    ) -> RichMediaItem? {
-        if let attachment = message.attachments.first(where: {
-            $0.url == region.openURL
-        }) {
-            var item = RichMediaItem(attachment)
-            guard case .image = item.kind else { return nil }
-            item.id = region.componentID
-            item.title = region.title
-            item.description = region.description
-            return item
+    /// A file component's item: its message attachment, or the file the
+    /// component names, previewed by its kind. A named file of no known type
+    /// with an image's extension shows as an image.
+    private static func componentFileItem(
+        _ region: NativeTimelineComponentLayout.FileRegion
+    ) -> RichMediaItem {
+        var item = RichMediaItem(region.attachment)
+        if item.kind == .file, RichMediaItem.isSupportedImageURL(region.openURL) {
+            item.kind = .image(animated: RichMediaItem.isAnimatedImageURL(region.openURL))
         }
-        guard RichMediaItem.isSupportedImageURL(region.openURL) else {
-            return nil
-        }
-        return RichMediaItem(
-            imageID: region.componentID,
-            url: region.openURL,
-            title: region.title,
-            description: region.description
-        )
+        item.id = region.componentID
+        item.title = region.title
+        item.description = region.description
+        return item
     }
 }
 

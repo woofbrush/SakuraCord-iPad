@@ -3,6 +3,12 @@ import SakuraCordModels
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// `@time` opens a picker that replaces its query in the draft.
+private struct ComposerMentionPicker {
+    let range: NSRange
+    let seconds: Int64
+}
+
 struct ComposerView: View {
     typealias Conversation = MessageComposerDestination
 
@@ -20,6 +26,13 @@ struct ComposerView: View {
     @State private var showStickerPicker = false
     @State private var showEmojiPicker = false
     @State private var isFocused = false
+    @Environment(\.columnPresentation) private var columnPresentation
+    @Environment(\.isLeavingWorkspace) private var isLeaving
+    /// The send button's mode before the composer's pane began to leave.
+    /// Closing a thread clears its draft and recording and allows no voice
+    /// messages, and the button changed as the pane slid away.
+    @State private var showedSendSlotMode = ComposerSendSlot.Mode.send
+    @State private var focusedColumnPresentation = 0
     @State private var isComposing = false
     @State private var draftSelection: NSRange?
     @State private var selectionBeforeEmojiPicker: NSRange?
@@ -30,9 +43,17 @@ struct ComposerView: View {
     @State private var emojiPickerDismissedAt: TimeInterval = -.infinity
     @State private var autocompleteIndex = 0
     @State private var autocompleteKeyboardSelectionRevision = 0
+    @State private var gameMentionSearch = ComposerGameMentionSearch()
     @State private var isAutocompleteDismissed = false
+    @State private var commandAwaitingClear: ApplicationCommand?
+    @State private var timestampClock = RelativeTimestampDisplayClock()
+    @State private var mentionPicker: ComposerMentionPicker?
     @State private var sendTransitionAnchor = ComposerSendTransitionAnchor()
     @State private var holdsPlaceholderForSendTransition = false
+    /// A send clears the composer under the message leaving it, so the
+    /// composer collapses at once rather than animating.
+    @State private var isClearingForSend = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         @Bindable var model = model
@@ -56,12 +77,23 @@ struct ComposerView: View {
                             toggleMention: toggleReplyMention,
                             cancel: cancelReply
                         )
+                        .transition(Self.headerTransition)
                         Divider()
+                            .transition(.opacity)
                     }
                     if !hasActiveCommand, !attachments.isEmpty {
                         ComposerAttachmentTray(
                             attachments: attachments,
+                            checkingIDs: model.composer.checkingAttachmentIDs,
+                            uploads: model.attachmentUploads,
                             sendTransitionAnchor: sendTransitionAnchor,
+                            mediaViewerSourceID: {
+                                model.mediaViewerPresentation?.uncoveredSourceItemID(showing: model.mediaViewerSelectedItemID)
+                            },
+                            scrolled: {
+                                guard let link = model.mediaViewerPresentation?.transitionLink else { return }
+                                sendTransitionAnchor.followMediaViewerSources(in: link)
+                            },
                             open: openComposerAttachment,
                             toggleSpoiler: {
                                 model.toggleComposerAttachmentSpoiler($0, in: conversation)
@@ -73,21 +105,22 @@ struct ComposerView: View {
                                 model.removeComposerAttachment($0, from: conversation)
                             }
                         )
+                        .transition(Self.headerTransition)
                         Divider()
                             .padding(.horizontal, InterfaceScale.metric(11))
+                            .transition(.opacity)
                     }
                 }
+                // The composer grows upward, so the header rises out of the
+                // field rather than dropping in from above.
+                .clipped()
             },
             leading: {
                 Group {
                     if hasActiveCommand, let commandDraft = commandComposer.draft {
                         ApplicationCommandComposerBadge(command: commandDraft.command, cancel: cancelCommand)
                     } else if !isCreatingThread {
-                        ComposerAttachmentButton(appearance: appearance) {
-                            showComposerActions.toggle()
-                        }
-                        .disabled(hasActiveCommand || !hasComposerActions)
-                        .opacity(hasComposerActions ? 1 : 0.4)
+                        composerLeadingButton(appearance: appearance)
                         .escapeDismissiblePopover(isPresented: $showComposerActions, arrowEdge: .top) {
                             VStack(alignment: .leading, spacing: InterfaceScale.metric(4)) {
                                 if canAddAttachments {
@@ -215,13 +248,17 @@ struct ComposerView: View {
                                     : 0,
                                 sendTransitionAnchor: sendTransitionAnchor,
                                 selection: $draftSelection,
+                                // The hidden editor takes no typing while a voice message is shown.
                                 isFocused: Binding(
-                                    get: { !hasActiveCommand && isFocused },
-                                    set: { if !hasActiveCommand { isFocused = $0 } }
+                                    get: { !hasActiveCommand && !isVoiceMessageActive && isFocused },
+                                    set: { if !hasActiveCommand, !isVoiceMessageActive { isFocused = $0 } }
                                 )
                             )
                             .frame(minHeight: ChatChromeMetrics.composerControlHeight)
-                            if draft.isEmpty, !isComposing {
+                            .opacity(isVoiceMessageActive ? 0 : 1)
+                            .allowsHitTesting(!isVoiceMessageActive)
+                            .accessibilityHidden(isVoiceMessageActive)
+                            if draft.isEmpty, !isComposing, !isVoiceMessageActive {
                                 Text(composerPlaceholder)
                                     .foregroundStyle(.tertiary)
                                     .font(.interfaceSystem(size: 15))
@@ -229,11 +266,9 @@ struct ComposerView: View {
                                     .truncationMode(.tail)
                                     .allowsHitTesting(false)
                                     .accessibilityHidden(true)
-                                    .frame(
-                                        maxWidth: .infinity,
-                                        maxHeight: .infinity,
-                                        alignment: .leading
-                                    )
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                                    // Typing swaps it for text at once; the composer's animations don't fade it.
+                                    .transition(.identity)
                                     // Sent text leaves from this spot; let it go first.
                                     .opacity(holdsPlaceholderForSendTransition ? 0 : 1)
                                     .animation(.easeIn(duration: 0.15), value: holdsPlaceholderForSendTransition)
@@ -247,6 +282,7 @@ struct ComposerView: View {
                                     premiumType: model.currentUser?.premiumType
                                 )
                             }
+                            if isVoiceMessageActive { voiceMessageField }
                         }
                     }
                 }
@@ -255,7 +291,7 @@ struct ComposerView: View {
             },
             accessories: {
                 HStack(spacing: 1) {
-                    Group {
+                    if !isVoiceMessageActive {
                         ForEach(model.appearanceSettings.composerIcons.order) { icon in
                             switch icon {
                             case .gif:
@@ -309,24 +345,13 @@ struct ComposerView: View {
                                 }
                             }
                         }
-                    }
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    } else if voiceMessage.phase.recording != nil { voiceMessageDiscardButton(appearance: appearance) }
                 }
                 .frame(height: ChatChromeMetrics.composerControlHeight)
                 .disabled(hasActiveCommand)
             },
-            send: {
-                TimelineView(.periodic(from: .now, by: 0.25)) { context in
-                    let coolingDown = activeConversationID.map {
-                        model.slowmodeRemaining(in: $0, now: context.date) > 0
-                    } ?? false
-                    ComposerSendButton(
-                        action: submitComposer,
-                        appearance: appearance,
-                        isSlowmodeBlocked: coolingDown
-                    )
-                    .disabled(!composerCanSubmit && !coolingDown)
-                }
-            },
+            send: { composerSendSlot(appearance: appearance) },
             overlay: { composerOverlay }
         )
         VStack(spacing: 0) {
@@ -334,6 +359,13 @@ struct ComposerView: View {
                 ComposerSlowmodeIndicator(model: model, channelID: activeConversationID)
             }
             chrome
+                .animation(.smooth(duration: 0.42, extraBounce: 0.08), value: voiceMessagePhaseKey)
+                .animation(.smooth(duration: 0.3), value: showsVoiceMessageButton)
+                .onChange(of: isLeaving ? nil : liveSendSlotMode, initial: true, holdSendSlotMode)
+                .animation(animatesChromeResize ? ComposerResizeMotion.animation : nil, value: chromeKey)
+                // Another conversation's composer appears in place, as the
+                // timeline does.
+                .transaction(value: activeConversationID) { $0.disablesAnimations = true }
                 .padding(.horizontal, ChatChromeMetrics.composerWindowInset)
                 .padding(.bottom, ChatChromeMetrics.composerWindowInset)
                 .keyframeAnimator(
@@ -377,7 +409,10 @@ struct ComposerView: View {
         }
         .composerShortcutCommands(
             conversation: conversation,
-            focus: { isFocused = true },
+            focus: { selection in
+                if let selection { draftSelection = selection }
+                isFocused = true
+            },
             chooseAttachment: { if canAddAttachments { showFileImporter = true } },
             togglePicker: { action in
                 guard !hasActiveCommand else { return }
@@ -407,6 +442,10 @@ struct ComposerView: View {
                 stickerPickerDismissedAt = ProcessInfo.processInfo.systemUptime
             }
         }
+        .background { commandMentionHandling }
+        .onChange(of: draftHasRelativeTimestamp, initial: true) { _, counts in
+            counts ? timestampClock.start() : timestampClock.stop()
+        }
         .onChange(of: model.builtInExpressionPickerRequest) { _, request in
             guard let request,
                   request.channelID == activeConversationID else { return }
@@ -424,6 +463,7 @@ struct ComposerView: View {
             }
         }
         .onChange(of: draft) { _, value in
+            mentionPicker = nil
             if completeClosedEmojiName(in: value) {
                 return
             }
@@ -431,6 +471,12 @@ struct ComposerView: View {
             autocompleteIndex = 0
             updateSlashPicker(for: value)
             updateMentionMemberSearch()
+        }
+        .onChange(of: chromeKey) { previous, current in
+            guard animatesChromeResize,
+                  previous.conversationID == current.conversationID
+            else { return }
+            model.composer.noteAnimatedResize(of: conversation)
         }
         .onChange(of: draftSelection) { _, _ in
             isAutocompleteDismissed = false
@@ -449,16 +495,23 @@ struct ComposerView: View {
             model.refreshApplicationCommandAutocomplete(in: conversation)
             updateCommandMemberSearch(current)
         }
-        .onDisappear {
-            composerDropInteraction?.clear(destination: conversation)
-            if let channelID = sendTransitionAnchor.channelID {
-                model.timelineSendTransitionStore.discard(channelID)
-            }
+        .onDisappear(perform: composerDidDisappear)
+        .onChange(of: voiceMessage.errorMessage) { _, message in
+            guard let message else { return }
+            model.errorMessage = message
+            voiceMessage.clearError()
+        }
+        .task(id: gameMentionContext?.query) { [query = gameMentionContext?.query] in
+            await gameMentionSearch.search(query ?? "", model: model)
         }
         .task(id: composerPresentationID) {
+            if !voiceMessage.restoreAfterGuildTimeout(in: activeConversationID) {
+                voiceMessage.discard(playback: model.voiceMessagePlayback)
+            }
             sendTransitionAnchor.channelID = activeConversationID
             model.timelineSendTransitionStore.registerComposer(sendTransitionAnchor)
             draftSelection = nil
+            mentionPicker = nil
             selectionBeforeEmojiPicker = nil
             showFileImporter = false
             showGIFPicker = false
@@ -467,6 +520,7 @@ struct ComposerView: View {
             let isClosedVoiceChat = model.selectedChannel?.kind == .voice
                 && !model.isVoiceChatOpen
             guard conversation == .thread || !isClosedVoiceChat else { return }
+            await clearFocusOfReusedPane()
             isFocused = true
             if supportsCommands {
                 model.ensureApplicationCommandsLoaded(in: conversation)
@@ -488,26 +542,12 @@ struct ComposerView: View {
 
     private var composerPresentationID: String {
         let conversationID = activeConversationID?.rawValue.description ?? "none"
-        return "\(conversation):\(conversationID):\(model.isVoiceChatOpen)"
+        return "\(conversation):\(conversationID):\(model.isVoiceChatOpen):\(columnPresentation)"
     }
 
     private var commandPanelCornerRadius: CGFloat {
         model.appearanceSettings.composerBarAppearance == .legacy
             ? ChatChromeMetrics.composerMinimumCornerRadius : ChatChromeMetrics.composerCornerRadius
-    }
-
-    /// Composer menus belong to the active input, like Discord's: they hide
-    /// when the editor loses focus or the window becomes inactive, and return
-    /// unchanged with focus.
-    private var isInputActive: Bool {
-        isFocused && appearsActive
-    }
-
-    @ViewBuilder
-    private var composerOverlay: some View {
-        if isInputActive {
-            composerMenus
-        }
     }
 
     @ViewBuilder
@@ -538,6 +578,10 @@ struct ComposerView: View {
                 ApplicationCommandHelpStrip(draft: draft, issue: commandComposer.fieldIssue, cancel: cancelCommand)
                     .commandPanelSurface(cornerRadius: commandPanelCornerRadius)
             }
+        } else if let mentionPicker {
+            mentionPickerMenu(mentionPicker)
+        } else if let context = gameMentionContext {
+            gameMentionMenu(context)
         } else if let context = mentionAutocompleteContext {
             let suggestions = mentionAutocompleteSuggestions(for: context)
             if !suggestions.isEmpty {
@@ -716,7 +760,8 @@ struct ComposerView: View {
     private func send() {
         guard !isSubmitting, allowsSubmission() else { return }
         if isCreatingThread, !model.validateThreadCreation() { return }
-        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty,
+              !hasCheckingAttachments
         else { return }
         isSubmitting = true
         draftSelection = nil
@@ -729,7 +774,18 @@ struct ComposerView: View {
         }
         model.beginUsingOwnedPromisedFiles(staged.map(\.url))
         if !keepsCreationDraft {
-            model.clearComposerAttachments(for: conversation)
+            isClearingForSend = true
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                // The files go on to the outbox, keeping their early uploads.
+                model.setComposerAttachments([], for: conversation)
+            }
+            Task { @MainActor in
+                // The draft and reply clear once the message is enqueued.
+                try? await Task.sleep(for: .milliseconds(250))
+                isClearingForSend = false
+            }
         }
         Task {
             defer {
@@ -753,23 +809,12 @@ struct ComposerView: View {
                 // Nothing will arrive to take the held message over.
                 model.timelineSendTransitionStore.discard(conversationID)
             }
-            if !keepsCreationDraft, !result.consumedComposer, activeConversationID == conversationID {
-                model.restoreComposerAttachments(staged, to: conversation)
+            if !keepsCreationDraft, !result.consumedComposer {
+                model.returnUnsentComposerAttachments(staged, to: conversation, from: conversationID)
             }
             isSubmitting = false
             isFocused = true
         }
-    }
-
-    private func openComposerAttachment(_ id: UUID) {
-        guard let currentUser = model.currentUser,
-              let presentation = NativeTimelineMediaViewerPlan.composerAttachments(
-                  attachments,
-                  selectedAttachmentID: id,
-                  author: currentUser
-              )
-        else { return }
-        model.mediaViewerPresentation = presentation
     }
 
     private var autocompleteContext: ColonAutocompleteContext? {
@@ -794,10 +839,11 @@ struct ComposerView: View {
         case .member:
             return MentionAutocompleteSuggestionFactory.memberSuggestions(
                 query: context.query,
-                recentMessages: activeMessages,
-                localMembers: model.mentionAutocompleteMembers,
-                remoteMembers: model.mentionMemberResults,
+                recentMessages: activeMessages.filter { !model.isMessageSuppressed($0) },
+                localMembers: model.mentionAutocompleteMembers.filter { !model.isUserIgnored($0.id) },
+                remoteMembers: model.mentionMemberResults.filter { !model.isUserIgnored($0.id) },
                 roles: model.guildRoles,
+                isGuildChannel: model.selectedChannel?.guildID != nil,
                 canMentionNonMentionableRoles:
                 MentionAutocompleteSuggestionFactory.canMentionNonMentionableRoles(
                     in: model.selectedChannel,
@@ -819,15 +865,6 @@ struct ComposerView: View {
                 currentMember: (model.currentUser?.id).flatMap { model.membersByID[$0] },
                 roles: model.guildRoles
             )
-        }
-    }
-
-    private var composerMentionPresentations: [String: MentionPresentation] {
-        let resolver = MessageMentionResolver(model: model)
-        return MessageDocumentCache.shared.document(for: draft).segments.reduce(into: [:]) { values, segment in
-            if case let .mention(mention) = segment {
-                values[mention.rawToken] = resolver.presentation(mention)
-            }
         }
     }
 
@@ -885,6 +922,7 @@ struct ComposerView: View {
             return true
         }
         return !isSubmitting
+            && !hasCheckingAttachments
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
             && draft.count <= ChatCharacterLimitPolicy.limit(
@@ -995,6 +1033,10 @@ struct ComposerView: View {
     }
 
     private func submitComposer() {
+        if isVoiceMessageActive {
+            if sendSlotMode == .sendVoice { sendVoiceMessage() }
+            return
+        }
         if !hasActiveCommand, model.canPresentIssueReport,
            let command = SakuraCordBuiltInCommands.commands.first(where: {
                draft.trimmingCharacters(in: .whitespacesAndNewlines) == "/\($0.name)"
@@ -1034,6 +1076,12 @@ struct ComposerView: View {
         }
         if supportsCommands, commandComposer.isPickerPresented {
             return handleCommandPickerAutocomplete(command)
+        }
+        if let mentionPicker {
+            return handleMentionPickerCommand(command, picker: mentionPicker)
+        }
+        if let context = gameMentionContext {
+            return handleGameMention(command, context: context)
         }
         if let context = mentionAutocompleteContext, !mentionAutocompleteSuggestions.isEmpty {
             return handleMentionAutocomplete(command, context: context)
@@ -1154,16 +1202,6 @@ struct ComposerView: View {
         isAutocompleteDismissed = true
     }
 
-    private func acceptMentionAutocomplete(
-        _ suggestion: MentionAutocompleteSuggestion,
-        context: MentionAutocompleteContext
-    ) {
-        if let member = suggestion.member { model.rememberMentionMember(member) }
-        draftSelection = insertInDraft(suggestion.value + " ", replacing: context.range)
-        autocompleteIndex = 0
-        isAutocompleteDismissed = true
-    }
-
     @discardableResult
     private func insertInDraft(
         _ insertedText: String,
@@ -1178,9 +1216,10 @@ struct ComposerView: View {
     }
 
     private var capturesUnfocusedTyping: Bool {
-        conversation == (model.hasThreadPane ? .thread : .channel)
+        conversation == model.activeComposerDestination
             && model.threadCreation?.isSubmitting != true
             && !showEmojiPicker && !showGIFPicker && !showStickerPicker
+            && !isVoiceMessageActive
     }
 
     private var commandComposer: ApplicationCommandComposerModel {
@@ -1247,40 +1286,6 @@ struct ComposerView: View {
         }
     }
 
-    private var activeReply: Message? {
-        switch conversation {
-        case .channel: model.replyingTo
-        case .thread: model.threadReplyingTo
-        }
-    }
-
-    private var activeReplyMentionsAuthor: Bool {
-        switch conversation {
-        case .channel: model.replyMentionsAuthor
-        case .thread: model.threadReplyMentionsAuthor
-        }
-    }
-
-    private var attachments: [ForumPostAttachment] {
-        model.composerAttachments(for: conversation)
-    }
-
-    private var draft: String {
-        switch conversation {
-        case .channel: model.draft
-        case .thread: model.threadDraft
-        }
-    }
-
-    private func updateDraft(_ value: String) {
-        switch conversation {
-        case .channel:
-            model.updateDraft(value)
-        case .thread:
-            model.updateThreadDraft(value)
-        }
-    }
-
     private func cancelReply() {
         model.cancelReply(in: conversation)
     }
@@ -1294,21 +1299,465 @@ struct ComposerView: View {
 }
 
 private extension ComposerView {
-    /// Bubble timelines animate a sent message out of the field; the
-    /// timeline consumes this when the optimistic row arrives.
+    @ViewBuilder
+    private var composerOverlay: some View {
+        if isInputActive {
+            composerMenus
+        }
+    }
+
+    /// Composer menus belong to the active editor. They hide when the window
+    /// becomes inactive.
+    private var isInputActive: Bool {
+        appearsActive && isFocused
+    }
+
+    private var composerMentionPresentations: [String: MentionPresentation] {
+        _ = model.timelinePresentationRevision
+        let values = MessageMentionResolver(model: model).presentations(in: draft)
+        guard draftHasRelativeTimestamp else { return values }
+        return TimestampMentionPresentation.refreshed(values, source: draft, at: timestampClock.date)
+    }
+
+    /// A relative time in the draft counts on, as it will once sent.
+    private var draftHasRelativeTimestamp: Bool {
+        draft.contains(":R>")
+    }
+
+    private func acceptMentionAutocomplete(
+        _ suggestion: MentionAutocompleteSuggestion,
+        context: MentionAutocompleteContext
+    ) {
+        autocompleteIndex = 0
+        isAutocompleteDismissed = true
+        switch suggestion.action {
+        case .chooseTimeFormat:
+            mentionPicker = ComposerMentionPicker(range: context.range, seconds: Int64(Date.now.timeIntervalSince1970))
+        case .insert:
+            if let member = suggestion.member { model.rememberMentionMember(member) }
+            draftSelection = insertInDraft(suggestion.value + " ", replacing: context.range)
+        }
+    }
+
+    private func mentionPickerMenu(_ picker: ComposerMentionPicker) -> some View {
+        ComposerTimeFormatPicker(
+            seconds: picker.seconds,
+            selectedIndex: autocompleteIndex,
+            cornerRadius: commandPanelCornerRadius,
+            keyboardSelectionRevision: autocompleteKeyboardSelectionRevision,
+            select: {
+                insertMentionPickerResult(DiscordTimestampToken(seconds: picker.seconds, style: $0).rawToken, range: picker.range)
+            },
+            highlight: { autocompleteIndex = $0 }
+        )
+    }
+
+    private func handleMentionPickerCommand(_ command: ComposerAutocompleteCommand, picker: ComposerMentionPicker) -> Bool {
+        let styles = ComposerTimeFormatPicker.styles
+        switch command {
+        case .previous:
+            autocompleteIndex = (autocompleteIndex - 1 + styles.count) % styles.count
+        case .next:
+            autocompleteIndex = (autocompleteIndex + 1) % styles.count
+        case .accept, .advance:
+            let token = DiscordTimestampToken(seconds: picker.seconds, style: styles[autocompleteIndex])
+            insertMentionPickerResult(token.rawToken, range: picker.range)
+        case .dismiss:
+            dismissMentionPicker()
+        case .previousField, .nextField, .removeField:
+            return false
+        }
+        return true
+    }
+
+    /// A title can contain `@`, but a mention typed after the query is
+    /// completed as one. An open slash picker keeps the keys, so the menu
+    /// waits for it to close.
+    private var gameMentionContext: GameMentionContext? {
+        guard !isAutocompleteDismissed, mentionAutocompleteContext == nil,
+              !(supportsCommands && commandComposer.isPickerPresented)
+        else { return nil }
+        return GameMentionContext(text: draft, selection: draftSelection)
+    }
+
+    private func gameMentionMenu(_ context: GameMentionContext) -> some View {
+        ComposerGameMentionPicker(
+            search: gameMentionSearch,
+            query: context.query,
+            selectedIndex: autocompleteIndex,
+            cornerRadius: commandPanelCornerRadius,
+            keyboardSelectionRevision: autocompleteKeyboardSelectionRevision,
+            select: { insertGameMention($0, context: context) },
+            highlight: { autocompleteIndex = $0 }
+        )
+    }
+
+    /// Keys while games match what is typed after `@game `.
+    private func handleGameMention(_ command: ComposerAutocompleteCommand, context: GameMentionContext) -> Bool {
+        let games = gameMentionSearch.games
+        if command == .previous || command == .next { autocompleteKeyboardSelectionRevision &+= 1 }
+        switch command {
+        case .previous:
+            guard !games.isEmpty else { return true }
+            autocompleteIndex = (autocompleteIndex - 1 + games.count) % games.count
+        case .next:
+            guard !games.isEmpty else { return true }
+            autocompleteIndex = (autocompleteIndex + 1) % games.count
+        case .accept, .advance:
+            guard !games.isEmpty else { return true }
+            insertGameMention(games[min(autocompleteIndex, games.count - 1)], context: context)
+        case .dismiss:
+            isAutocompleteDismissed = true
+        case .previousField, .nextField, .removeField:
+            return false
+        }
+        return true
+    }
+
+    private func insertGameMention(_ game: ProfileGame, context: GameMentionContext) {
+        model.rememberGameMention(game)
+        draftSelection = insertInDraft("<@$\(game.id)> ", replacing: context.range)
+        autocompleteIndex = 0
+    }
+
+    private func dismissMentionPicker() {
+        mentionPicker = nil
+        isAutocompleteDismissed = true
+        isFocused = true
+    }
+
+    /// Starts a clicked command mention once this conversation's commands
+    /// have loaded, asking first before it replaces a written message, as
+    /// Discord does. One that is not offered here stays typed.
+    private var commandMentionHandling: some View {
+        Color.clear
+            .onChange(of: commandComposer.mentionedCommand, startMentionedCommand)
+            .onChange(of: commandComposer.isLoading, startMentionedCommand)
+            .alert("Clear message?", item: $commandAwaitingClear) { command in
+                Button("Clear", role: .destructive) {
+                    if isVoiceMessageActive { voiceMessage.discard(playback: model.voiceMessagePlayback) }
+                    activateCommand(command)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("Looks like you’ve already written something. Do you want to clear it and use a command?", bundle: #bundle)
+            }
+    }
+
+    private func startMentionedCommand() {
+        guard let mention = commandComposer.mentionedCommand, !commandComposer.isLoading else { return }
+        commandComposer.mentionedCommand = nil
+        isFocused = true
+        guard let command = commandComposer.command(mentioned: mention) else {
+            if draft.isEmpty { updateDraft("/\(mention.name)") }
+            return
+        }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments.isEmpty,
+           !hasActiveCommand, !isVoiceMessageActive {
+            activateCommand(command)
+        } else {
+            commandAwaitingClear = command
+        }
+    }
+
+    private func insertMentionPickerResult(_ token: String, range: NSRange) {
+        mentionPicker = nil
+        draftSelection = insertInDraft(token + " ", replacing: range)
+        autocompleteIndex = 0
+        isAutocompleteDismissed = true
+        isFocused = true
+    }
+}
+
+extension ComposerView {
+    private func composerDidDisappear() {
+        timestampClock.stop()
+        if let channelID = sendTransitionAnchor.channelID,
+           channelID == activeConversationID,
+           model.guildTimeoutUntil(in: channelID) != nil {
+            voiceMessage.preserveForGuildTimeout(in: channelID, playback: model.voiceMessagePlayback)
+        } else {
+            voiceMessage.discard(playback: model.voiceMessagePlayback)
+        }
+        composerDropInteraction?.clear(destination: conversation)
+        if let channelID = sendTransitionAnchor.channelID {
+            model.timelineSendTransitionStore.discard(channelID)
+        }
+    }
+
+    /// One button morphs between attaching, discarding a recording, and
+    /// previewing it.
+    func composerLeadingButton(appearance: ComposerBarAppearance) -> some View {
+        ComposerActionButton(
+            icon: Image(systemName: leadingSymbol),
+            help: leadingHelp,
+            iconSize: 19,
+            iconWeight: .regular,
+            showsHoverBackground: appearance == .legacy,
+            appearance: appearance,
+            action: performLeadingAction
+        )
+        .contentTransition(.symbolEffect(.replace.magic(fallback: .downUp.byLayer)))
+        .disabled(hasActiveCommand || (!hasComposerActions && !isVoiceMessageActive) || !voiceMessage.canPreview)
+        .opacity((hasComposerActions || isVoiceMessageActive) && voiceMessage.canPreview ? 1 : 0.4)
+        .animation(.smooth(duration: 0.2), value: voiceMessage.canPreview)
+    }
+
+    /// Sits where the composer icons were, tinted like the delete action.
+    func voiceMessageDiscardButton(appearance: ComposerBarAppearance) -> some View {
+        ComposerActionButton(
+            icon: Image(systemName: "trash"),
+            help: "Delete voice message",
+            iconSize: 19,
+            size: appearance.accessoryButtonSize,
+            appearance: appearance,
+            role: .destructive,
+            action: discardVoiceMessage
+        )
+        .fixedSize()
+        .transition(.scale(scale: 0.6).combined(with: .opacity))
+    }
+
+    var voiceMessageField: some View {
+        ComposerVoiceMessageField(
+            state: voiceMessage,
+            playback: model.voiceMessagePlayback
+        )
+        .transition(
+            .asymmetric(
+                insertion: .opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)),
+                removal: .opacity.combined(with: .scale(scale: 0.96, anchor: .leading))
+            )
+        )
+    }
+
+    func composerSendSlot(appearance: ComposerBarAppearance) -> some View {
+        let deadline = activeConversationID.flatMap { channelID in
+            let configuration = model.slowmodeConfiguration(in: channelID)
+            return model.composer.slowmode.deadline(
+                in: channelID, interval: configuration.interval, immune: configuration.immune
+            )
+        }
+        return TimelineView(ComposerSlowmodeTimelineSchedule(deadline: deadline)) { context in
+            let coolingDown = deadline.map { $0 > context.date } ?? false
+            ComposerSendSlot(
+                mode: sendSlotMode,
+                appearance: appearance,
+                isSlowmodeBlocked: coolingDown,
+                send: sendSlotMode == .sendVoice ? sendVoiceMessage : submitComposer,
+                startRecording: startVoiceMessage,
+                stopRecording: { voiceMessage.stop() }
+            )
+            .disabled(sendSlotIsDisabled(coolingDown: coolingDown))
+        }
+    }
+
+    private var voiceMessage: VoiceMessageComposerState {
+        model.voiceMessageComposer(for: conversation)
+    }
+
+    private var isVoiceMessageActive: Bool {
+        voiceMessage.phase.isActive
+    }
+
+    /// Changes only between phases, not with every recording level.
+    private var voiceMessagePhaseKey: Int {
+        switch voiceMessage.phase {
+        case .idle: 0
+        case .starting: 1
+        case .recording: 2
+        case .finishing: 3
+        case .recorded: 4
+        }
+    }
+
+    /// Keeps the mode current while the pane is in place, including when it
+    /// returns before leaving finished. A leaving composer also gives up the
+    /// keyboard: typing would land in the closed thread's draft.
+    private func holdSendSlotMode(_: ComposerSendSlot.Mode?, _ mode: ComposerSendSlot.Mode?) {
+        if let mode { showedSendSlotMode = mode } else { isFocused = false }
+    }
+
+    /// With nothing to send, the send button records a voice message instead.
+    private var showsVoiceMessageButton: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty && !hasActiveCommand && !isCreatingThread
+            && model.canSendVoiceMessages(in: conversation)
+    }
+
+    private var sendSlotMode: ComposerSendSlot.Mode {
+        isLeaving ? showedSendSlotMode : liveSendSlotMode
+    }
+
+    private var liveSendSlotMode: ComposerSendSlot.Mode {
+        switch voiceMessage.phase {
+        case .idle: showsVoiceMessageButton ? .voice : .send
+        case .starting, .recording, .finishing: .stop
+        case .recorded: .sendVoice
+        }
+    }
+
+    private func sendSlotIsDisabled(coolingDown: Bool) -> Bool {
+        switch sendSlotMode {
+        case .send: !composerCanSubmit && !coolingDown
+        case .voice: false
+        case .stop: voiceMessage.phase == .finishing
+        case .sendVoice: isSubmitting || coolingDown
+        }
+    }
+
+    private var leadingSymbol: String {
+        switch voiceMessage.phase {
+        case .idle: "plus"
+        case .starting, .recording, .finishing: "trash"
+        case .recorded:
+            model.voiceMessagePlayback.phase(of: voiceMessage.playbackID) == .playing ? "pause.fill" : "play.fill"
+        }
+    }
+
+    private var leadingHelp: String {
+        switch voiceMessage.phase {
+        case .idle: "Add attachments"
+        case .starting, .recording, .finishing: "Delete voice message"
+        case .recorded where !voiceMessage.canPreview:
+            "Waiting for your headset to switch back from its microphone"
+        case .recorded:
+            model.voiceMessagePlayback.phase(of: voiceMessage.playbackID) == .playing ? "Pause" : "Play voice message"
+        }
+    }
+
+    private func performLeadingAction() {
+        switch voiceMessage.phase {
+        case .idle:
+            showComposerActions.toggle()
+        case .starting, .recording, .finishing:
+            discardVoiceMessage()
+        case let .recorded(recording):
+            model.voiceMessagePlayback.toggle(
+                voiceMessage.playbackID,
+                source: .local(recording.fileURL),
+                duration: recording.duration
+            )
+        }
+    }
+
+    private func startVoiceMessage() {
+        showComposerActions = false
+        showEmojiPicker = false
+        showGIFPicker = false
+        showStickerPicker = false
+        voiceMessage.start(inputDeviceID: model.voiceMessageInputDeviceID)
+    }
+
+    private func discardVoiceMessage() {
+        voiceMessage.discard(playback: model.voiceMessagePlayback)
+        isFocused = true
+    }
+
+    private func sendVoiceMessage() {
+        guard !isSubmitting, allowsSubmission() else { return }
+        isSubmitting = true
+        Task {
+            _ = await model.submitVoiceMessage(from: conversation)
+            isSubmitting = false
+            isFocused = true
+        }
+    }
+}
+
+private extension ComposerView {
+    var draft: String {
+        switch conversation {
+        case .channel: model.draft
+        case .thread: model.threadDraft
+        }
+    }
+
+    func updateDraft(_ value: String) {
+        switch conversation {
+        case .channel:
+            model.updateDraft(value)
+        case .thread:
+            model.updateThreadDraft(value)
+        }
+    }
+
+    var activeReply: Message? {
+        switch conversation {
+        case .channel: model.replyingTo
+        case .thread: model.threadReplyingTo
+        }
+    }
+
+    var activeReplyMentionsAuthor: Bool {
+        switch conversation {
+        case .channel: model.replyMentionsAuthor
+        case .thread: model.threadReplyMentionsAuthor
+        }
+    }
+
+    var attachments: [ForumPostAttachment] {
+        model.composerAttachments(for: conversation)
+    }
+
+    var hasCheckingAttachments: Bool {
+        let checking = model.composer.checkingAttachmentIDs
+        return !checking.isEmpty && attachments.contains { checking.contains($0.id) }
+    }
+
+    static var headerTransition: AnyTransition {
+        AnyTransition(.blurReplace).combined(with: .offset(y: InterfaceScale.metric(14)))
+    }
+
+    var chromeKey: ComposerChromeKey {
+        ComposerChromeKey(
+            conversationID: activeConversationID,
+            attachmentIDs: hasActiveCommand ? [] : attachments.map(\.id),
+            replyID: hasActiveCommand ? nil : activeReply?.id,
+            hasActiveCommand: hasActiveCommand,
+            hasTranslationHeader: model.draftTranslation(for: conversation) != nil
+        )
+    }
+
+    var animatesChromeResize: Bool {
+        !reduceMotion && !model.accessibilitySettings.disablesAllAnimations && !isClearingForSend
+    }
+
+    /// Opens a staged file in the media viewer, which zooms it out of its
+    /// tile and back into it.
+    func openComposerAttachment(_ id: UUID) {
+        guard let currentUser = model.currentUser,
+              let presentation = NativeTimelineMediaViewerPlan.composerAttachments(
+                  attachments,
+                  selectedAttachmentID: id,
+                  author: currentUser
+              )
+        else { return }
+        // Every staged file zooms back into its own tile, whichever the
+        // viewer shows when it closes.
+        let sources = attachments.compactMap(sendTransitionAnchor.mediaViewerSource)
+        model.mediaViewerSelectedItemID = id.uuidString
+        model.mediaViewerPresentation = presentation.withTimelineMedia(
+            previewImages: Dictionary(uniqueKeysWithValues: sources.map { ($0.itemID, $0.image) }),
+            transitionSources: Dictionary(uniqueKeysWithValues: sources.map { ($0.itemID, $0) })
+        )
+    }
+
+    /// The timeline animates a sent message out of the field, as a bubble or
+    /// as plain text; it consumes this when the optimistic row arrives.
     func registerSendTransition(
         channelID: ChannelID,
         attachments: [ForumPostAttachment]
     ) {
         // A send from older history first loads the newest messages, so
         // the field stays editable and nothing arrives to take it over yet.
-        guard model.appearanceSettings.messageAppearance == .bubbles,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              conversation == .thread || !model.hasMoreLaterMessages,
+        guard model.animatesMessageSending,
+              conversation == .thread ? !model.isThreadWindowAwayFromNewest : !model.hasMoreLaterMessages,
               let source = sendTransitionAnchor.source(
                   channelID: channelID,
                   content: draft.trimmingCharacters(in: .whitespacesAndNewlines),
-                  attachments: attachments
+                  attachments: attachments,
+                  uploads: model.attachmentUploads
               )
         else { return }
         model.timelineSendTransitionStore.register(source)
@@ -1326,5 +1775,16 @@ private struct ComposerActionLabelStyle: LabelStyle {
             configuration.icon.frame(width: InterfaceScale.metric(20), alignment: .center)
             configuration.title
         }
+    }
+}
+
+private extension ComposerView {
+    /// A pane reused from the pool left the window still marked focused, so
+    /// focusing it again would change nothing.
+    func clearFocusOfReusedPane() async {
+        guard columnPresentation != focusedColumnPresentation else { return }
+        focusedColumnPresentation = columnPresentation
+        isFocused = false
+        await Task.yield()
     }
 }

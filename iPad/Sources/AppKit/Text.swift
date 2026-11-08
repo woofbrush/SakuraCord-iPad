@@ -135,11 +135,14 @@ open class NSTextView: UITextView, UITextViewDelegate {
         drawBackground(in: rect)
         super.draw(rect)
     }
+    /// UIKit has already applied the selection; subclasses observe it here as on macOS.
+    @objc(ak_setSelectedRanges:affinity:stillSelecting:) open dynamic func setSelectedRanges(_: [NSValue], affinity _: NSSelectionAffinity, stillSelecting _: Bool) {}
     public func setSelectedRange(_ range: NSRange) { selectedRange = range }
     public func setSelectedRange(_ range: NSRange, affinity _: NSSelectionAffinity, stillSelecting _: Bool) { selectedRange = range }
     public func attributedString() -> NSAttributedString { attributedText ?? NSAttributedString() }
     public func hasMarkedText() -> Bool { markedTextRange != nil }
     public func breakUndoCoalescing() {}
+    public func showFindIndicator(for _: NSRange) {}
     public func invalidateTextContainerOrigin() {}
     public func updateInsertionPointStateAndRestartTimer(_: Bool) {}
     public func setAlignment(_ alignment: NSTextAlignment, range _: NSRange) { textAlignment = alignment }
@@ -204,6 +207,7 @@ open class NSTextView: UITextView, UITextViewDelegate {
     public func textViewDidChange(_: UITextView) { didChangeText() }
 
     public func textViewDidChangeSelection(_: UITextView) {
+        setSelectedRanges([NSValue(range: selectedRange)], affinity: .downstream, stillSelecting: false)
         nsDelegate?.textViewDidChangeSelection?(Notification(name: Notification.Name("NSTextViewDidChangeSelection"), object: self))
     }
 
@@ -266,7 +270,7 @@ open class NSTextView: UITextView, UITextViewDelegate {
     }
 }
 
-public nonisolated enum NSSelectionAffinity: Sendable { case upstream, downstream }
+@objc public nonisolated enum NSSelectionAffinity: Int, Sendable { case upstream, downstream }
 
 public final class NSTextInputContext: NSObject {
     static let shared = NSTextInputContext()

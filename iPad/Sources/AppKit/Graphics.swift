@@ -21,6 +21,7 @@ public nonisolated extension UIColor {
     static var unemphasizedSelectedTextBackgroundColor: UIColor { .systemFill }
     static var unemphasizedSelectedContentBackgroundColor: UIColor { .systemFill }
     static var controlAccentColor: UIColor { .tintColor }
+    static var keyboardFocusIndicatorColor: UIColor { .tintColor }
 
     convenience init(srgbRed red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) {
         self.init(red: red, green: green, blue: blue, alpha: alpha)
@@ -84,8 +85,10 @@ public nonisolated extension CGColor {
     static var white: CGColor { UIColor.white.cgColor }
 }
 
-public nonisolated struct NSColorSpace: Sendable {
+public nonisolated struct NSColorSpace: Hashable, Sendable {
+    public var cgColorSpace: CGColorSpace? { nil }
     public static let sRGB = NSColorSpace()
+    public static let genericGray = NSColorSpace()
     public static let deviceRGB = NSColorSpace()
     public static let genericRGB = NSColorSpace()
 }
@@ -184,6 +187,8 @@ public nonisolated final class NSFontManager: NSObject {
         return UIFont(descriptor: descriptor, size: font.pointSize)
     }
 
+    public func convert(_ font: UIFont, toSize size: CGFloat) -> UIFont { font.withSize(size) }
+
     public func traits(of font: UIFont) -> NSFontTraitMask {
         let symbolic = font.fontDescriptor.symbolicTraits
         var mask: NSFontTraitMask = []
@@ -195,7 +200,7 @@ public nonisolated final class NSFontManager: NSObject {
 
 // MARK: Graphics context
 
-public nonisolated enum NSImageInterpolation: Sendable {
+public nonisolated enum NSImageInterpolation: UInt, Sendable {
     case `default`, none, low, medium, high
 
     var cg: CGInterpolationQuality {
@@ -313,6 +318,25 @@ public nonisolated enum NSCompositingOperation: Sendable {
 // MARK: Bezier paths
 
 public nonisolated extension UIBezierPath {
+    func appendArc(from point1: CGPoint, to point2: CGPoint, radius: CGFloat) {
+        guard let path = cgPath.mutableCopy() else { return }
+        path.addArc(tangent1End: point1, tangent2End: point2, radius: radius)
+        cgPath = path
+    }
+
+    /// AppKit's "clockwise" is the reverse of UIKit's for the same angles.
+    func appendArc(
+        withCenter center: CGPoint, radius: CGFloat, startAngle: CGFloat, endAngle: CGFloat, clockwise: Bool = false
+    ) {
+        addArc(
+            withCenter: center, radius: radius,
+            startAngle: startAngle * .pi / 180, endAngle: endAngle * .pi / 180,
+            clockwise: !clockwise
+        )
+    }
+
+    static func clip(_ rect: CGRect) { UIRectClip(rect) }
+
     convenience init(roundedRect rect: CGRect, xRadius: CGFloat, yRadius _: CGFloat) {
         self.init(roundedRect: rect, cornerRadius: xRadius)
     }
@@ -612,6 +636,35 @@ public nonisolated final class NSBitmapImageRep: NSObject {
         )
         super.init()
         if context == nil { return nil }
+    }
+
+    private func pixel(x: Int, y: Int) -> UnsafeMutablePointer<UInt8>? {
+        guard let context, let data = context.data,
+              (0 ..< context.width).contains(x), (0 ..< context.height).contains(y)
+        else { return nil }
+        return data.assumingMemoryBound(to: UInt8.self) + y * context.bytesPerRow + x * 4
+    }
+
+    public func colorAt(x: Int, y: Int) -> UIColor? {
+        guard let pixel = pixel(x: x, y: y) else { return nil }
+        let alpha = CGFloat(pixel[3]) / 255
+        guard alpha > 0 else { return UIColor(white: 0, alpha: 0) }
+        return UIColor(
+            red: CGFloat(pixel[0]) / 255 / alpha,
+            green: CGFloat(pixel[1]) / 255 / alpha,
+            blue: CGFloat(pixel[2]) / 255 / alpha,
+            alpha: alpha
+        )
+    }
+
+    public func setColor(_ color: UIColor, atX x: Int, y: Int) {
+        guard let pixel = pixel(x: x, y: y) else { return }
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        pixel[0] = UInt8((red * alpha * 255).rounded())
+        pixel[1] = UInt8((green * alpha * 255).rounded())
+        pixel[2] = UInt8((blue * alpha * 255).rounded())
+        pixel[3] = UInt8((alpha * 255).rounded())
     }
 
     public struct BitmapFormat: OptionSet, Sendable {
