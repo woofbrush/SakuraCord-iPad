@@ -91,6 +91,7 @@ open class NSTextView: UITextView, UITextViewDelegate {
         super.init(frame: frame, textContainer: textContainer)
         backgroundColor = .clear
         textContainer?.lineFragmentPadding = 5
+        textContainerInset = .zero
         super.delegate = self
         isScrollEnabled = false
     }
@@ -149,7 +150,22 @@ open class NSTextView: UITextView, UITextViewDelegate {
         nsDelegate?.textView?(self, shouldChangeTextIn: range, replacementString: string) ?? true
     }
 
+    /// NSTextView grows with its content when vertically resizable; UITextView does not.
+    private func fitHeightToContent() {
+        guard isVerticallyResizable, !isTracking else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let used = layoutManager.usedRect(for: textContainer).height
+        let height = min(max(minSize.height, ceil(used) + textContainerInset.top + textContainerInset.bottom), maxSize.height)
+        if abs(frame.height - height) > 0.5 { frame.size.height = height }
+    }
+
+    override open func layoutSubviews() {
+        super.layoutSubviews()
+        fitHeightToContent()
+    }
+
     @objc open dynamic func didChangeText() {
+        fitHeightToContent()
         let note = Notification(name: NSText.didChangeNotification, object: self)
         nsDelegate?.textDidChange?(note)
         NotificationCenter.default.post(note)
@@ -213,6 +229,10 @@ open class NSTextView: UITextView, UITextViewDelegate {
     }
 
     override open func keyDown(with event: NSEvent) {
+        if !event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
+            if NSApp.textKeyEquivalentHandler?(event) == true { return }
+            if performKeyEquivalent(with: event) { return }
+        }
         if let selector = TextCommands.selector(for: event), handle(selector) { return }
         isHandlingHardwareNewline = event.keyCode == 36
         defer { isHandlingHardwareNewline = false }

@@ -5,7 +5,7 @@ public typealias NSClipView = UIScrollView
 public nonisolated enum NSBorderType: Sendable { case noBorder, lineBorder, bezelBorder, grooveBorder }
 public nonisolated enum NSScrollerStyle: Sendable { case legacy, overlay }
 
-open class NSScrollView: UIScrollView, UIScrollViewDelegate {
+open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable {
     public static let willStartLiveScrollNotification = Notification.Name("NSScrollViewWillStartLiveScroll")
     public static let didLiveScrollNotification = Notification.Name("NSScrollViewDidLiveScroll")
     public static let didEndLiveScrollNotification = Notification.Name("NSScrollViewDidEndLiveScroll")
@@ -55,6 +55,10 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate {
     override open func layoutSubviews() {
         super.layoutSubviews()
         syncContentSize()
+    }
+
+    func documentFrameDidChange(_ view: UIView) {
+        if view === documentView { syncContentSize() }
     }
 
     public func syncContentSize() {

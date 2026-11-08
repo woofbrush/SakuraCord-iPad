@@ -30,6 +30,18 @@
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SakuraCord uses the microphone for voice channels and calls.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SakuraCord uses the camera for video calls.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SakuraCord lets you attach photos to messages.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>SakuraCord can save images you choose to your library.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

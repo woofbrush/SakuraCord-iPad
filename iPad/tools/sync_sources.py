@@ -83,12 +83,67 @@ RULES = [
     (re.compile(r"[.]pickerStyle\([.]radioGroup\)"), ".pickerStyle(.segmented)"),
     (re.compile(r"\s*[.]horizontalRadioGroupLayout\(\)"), ""),
     (re.compile(r"\s*[.]collapsible\(false\)"), ""),
+    (re.compile(r'Image\("(discord|thread|github)", bundle: [.]module\)'), lambda m: f'Image("{m.group(1)}", bundle: .module).renderingMode(.template)'),
+    (re.compile(r'Image\("gif[.]square", bundle: [.]module\)'), 'Image("gif_square", bundle: .module).renderingMode(.template)'),
     (re.compile(r"NSFont\.preferredFont\("), "NSFont.macPreferredFont("),
 ]
 
 
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
+    "DiscordCaptchaPresentation.swift": [
+        (re.compile(r'webView[.]setValue\(false, forKey: "drawsBackground"\)'), "webView.isOpaque = false; webView.backgroundColor = .clear; webView.scrollView.backgroundColor = .clear"),
+    ],
+    # iPadOS draws its sidebar toggle where macOS draws the server name; keep the
+    # toggle at the sidebar's trailing edge, which is where macOS places it.
+    "RootView.swift": [
+        (re.compile(r"[.]navigationSplitViewColumnWidth\(\s*min: ChatChromeMetrics[.]serverRailWidth"),
+         lambda m: ".toolbar(removing: .sidebarToggle)\n            .toolbar { ToolbarItem(placement: .topBarTrailing) { padSidebarToggle } }\n            " + m.group(0)),
+        (re.compile(r"[.]toolbar [{]\s*detailToolbar\s*[}]"),
+         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n            }"),
+        (re.compile(r"(    @ViewBuilder private var workspace: some View [{])"),
+         lambda m: """    private var padSidebarToggle: some View {
+        Button {
+            NotificationCenter.default.post(name: .sakuracordToggleChannelSidebar, object: nil)
+        } label: {
+            Label("Toggle Sidebar", systemImage: "sidebar.leading")
+        }
+    }
+
+""" + m.group(1)),
+    ],
+    "InterfaceScale.swift": [
+        (re.compile(r"let isDefault = InterfaceScale[.]factor == 1 [|][|] isNested"), "let isDefault = isNested"),
+        (re.compile(r"if !isDefault [{] size = InterfaceScale[.]controlSize\(size\) [}]"), "if !isDefault { size = InterfaceScale.controlSize(size == .regular ? .small : size) }"),
+        (re.compile(r"guard InterfaceScale[.]factor != 1 else [{]\s*return [.]system\(style, design: design, weight: weight\)\s*[}]\s*"), ""),
+    ],
+    "ChatChromeMetrics.swift": [
+        (re.compile(r"static let sidebarTitleCenterY: CGFloat = 25"), "static var sidebarTitleCenterY: CGFloat { 25 + UIWindow.ak_chromeTopInset }"),
+    ],
+    "SakuraCordSignInExperience.swift": [
+        (re.compile(r"Rectangle\(\)\s*[.]fill\(colorScheme == [.]dark [?] Color\(hex: 0x101018\) : Color\(hex: 0xF6F5FA\)\)\s*[.]colorEffect\(ShaderLibrary[.]bundle\([.]module\)[.]sakuraSignInLight\(.*?\)\)\n", re.S),
+         """MetalShaderSurface(
+                function: "sakuraSignInLight",
+                elapsed: elapsed,
+                colors: [colors[0], colors[colors.count / 2], colors[colors.count - 1]],
+                scalar: colorScheme == .dark ? 1 : 0,
+                base: colorScheme == .dark ? Color(hex: 0x101018) : Color(hex: 0xF6F5FA)
+            )
+"""),
+    ],
+    "SakuraCordAuthenticationComponents.swift": [
+        (re.compile(r"Rectangle\(\)\s*[.]fill\([.]white\)\s*[.]colorEffect\(ShaderLibrary[.]bundle\([.]module\)[.]sakuraAuthenticationLoading\(.*?\)\)\n", re.S),
+         """MetalShaderSurface(
+                            function: "sakuraAuthenticationLoading",
+                            elapsed: elapsed,
+                            colors: [colors[0], colors[colors.count - 1]],
+                            scalar: intensity
+                        )
+"""),
+    ],
+    "SakuraCordWelcomeMetalView.swift": [
+        (re.compile(r"try device[.]makeDefaultLibrary\(bundle: [.]module\)"), "try device.makeLibrary(source: SakuraMetalSources.welcomePetals, options: nil)"),
+    ],
     "SettingsSidebar.swift": [
         (re.compile(r"List\(selection: [$]selection\) [{]"), "List(selection: Binding<SettingsPageID?>(get: { selection }, set: { if let value = $0 { selection = value } })) {"),
     ],
@@ -96,6 +151,7 @@ FILE_RULES = {
         (re.compile(r"(?<![\w.])tracking\b|(?<=self[.])tracking\b"), "ownTrackingArea"),
     ],
     "NativeTimelineSendTransition.swift": [
+        (re.compile(r"((?:[lL]ayer|Canvas[.]layer)[?]?[.]contents = )(?!nil)([^\n]+)"), lambda m: f"{m.group(1)}nsLayerContents({m.group(2)})"),
         (re.compile(r"let root = CALayer\(\)"), "let root = layer"),
         (re.compile(r"^\s*layer = root\n", re.M), ""),
     ],
@@ -111,7 +167,11 @@ FILE_RULES = {
     "EmojiPickerView.swift": [
         (re.compile(r"(focusRequestIsScheduled = true\s*)Task [{] @MainActor \[weak self\] in"), lambda m: f"{m.group(1)}Task<Void, Never> {{ @MainActor [weak self] in"),
     ],
+    "GIFPickerNativeGrid.swift": [
+        (re.compile(r"((?:[lL]ayer|Canvas[.]layer)[?]?[.]contents = )(?!nil)([^\n]+)"), lambda m: f"{m.group(1)}nsLayerContents({m.group(2)})"),
+    ],
     "AnimatedRemoteImage.swift": [
+        (re.compile(r"((?:[lL]ayer|Canvas[.]layer)[?]?[.]contents = )(?!nil)([^\n]+)"), lambda m: f"{m.group(1)}nsLayerContents({m.group(2)})"),
         (re.compile(r"var contentMode: ContentMode = [.]fit [{]"), "var nsContentMode: ContentMode = .fit {"),
         (re.compile(r"view[.]contentMode = contentMode"), "view.nsContentMode = contentMode"),
         (re.compile(r"^( +)contentMode == [.]fill [?]", re.M), lambda m: f"{m.group(1)}nsContentMode == .fill ?"),
@@ -136,8 +196,23 @@ def write_if_changed(path: pathlib.Path, text: str) -> None:
         path.write_text(text)
 
 
+def write_metal_sources(expected: set) -> None:
+    sources = {
+        "signInLight": MAC / "Resources/SignInLight.metal",
+        "welcomePetals": MAC / "Resources/WelcomePetals.metal",
+    }
+    body = "".join(
+        f'    static let {name} = #"""\n{path.read_text().replace(chr(13), "")}\n"""#\n'
+        for name, path in sources.items()
+    )
+    relative = pathlib.Path("MetalSources.swift")
+    expected.add(relative)
+    write_if_changed(OUT / relative, f"enum SakuraMetalSources {{\n{body}}}\n")
+
+
 def main() -> None:
     expected = set()
+    write_metal_sources(expected)
     for folder in FOLDERS:
         for source in sorted((MAC / folder).rglob("*.swift")):
             relative = source.relative_to(MAC)

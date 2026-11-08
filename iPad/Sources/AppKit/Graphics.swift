@@ -456,6 +456,10 @@ public nonisolated extension UIImage {
 
     /// `flipped: false` gives the handler AppKit's bottom-left origin.
     convenience init(size: CGSize, flipped: Bool, drawingHandler: @escaping (CGRect) -> Bool) {
+        guard size.width > 0, size.height > 0 else {
+            self.init()
+            return
+        }
         let rendered = UIGraphicsImageRenderer(size: size).image { renderer in
             if !flipped {
                 renderer.cgContext.translateBy(x: 0, y: size.height)
@@ -465,7 +469,11 @@ public nonisolated extension UIImage {
             _ = drawingHandler(CGRect(origin: .zero, size: size))
             ImageDrawing.isContextFlipped = false
         }
-        self.init(cgImage: rendered.cgImage!, scale: rendered.scale, orientation: .up)
+        guard let image = rendered.cgImage else {
+            self.init()
+            return
+        }
+        self.init(cgImage: image, scale: rendered.scale, orientation: .up)
     }
 
     convenience init(size: CGSize) {
@@ -494,7 +502,11 @@ public nonisolated extension UIImage {
     var representations: [NSBitmapImageRep] { cgImage.map { [NSBitmapImageRep(cgImage: $0)] } ?? [] }
 
     convenience init(representation: NSBitmapImageRep, size: CGSize) {
-        self.init(cgImage: representation.cgImage ?? UIImage().cgImage!, size: size)
+        guard let image = representation.cgImage else {
+            self.init()
+            return
+        }
+        self.init(cgImage: image, size: size)
     }
 
     /// Symbols are templates already; bitmap images keep their colors.
@@ -637,4 +649,9 @@ nonisolated extension UIImage.SymbolWeight {
         default: .regular
         }
     }
+}
+
+/// CALayer contents take a CGImage on iOS, where AppKit also accepts an NSImage.
+public func nsLayerContents(_ value: Any?) -> Any? {
+    (value as? UIImage).map { $0.cgImage as Any } ?? value
 }

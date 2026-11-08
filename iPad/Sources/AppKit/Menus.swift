@@ -182,9 +182,24 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
         presenter.interaction = interaction
         view.addInteraction(interaction)
         let selector = NSSelectorFromString("_presentMenuAtLocation:")
-        guard let method = class_getInstanceMethod(UIContextMenuInteraction.self, selector) else { return }
+        guard let method = class_getInstanceMethod(UIContextMenuInteraction.self, selector) else {
+            presenter.presentAsSheet(at: location)
+            return
+        }
         typealias Present = @convention(c) (AnyObject, Selector, CGPoint) -> Void
         unsafeBitCast(method_getImplementation(method), to: Present.self)(interaction, selector, location)
+    }
+
+    /// Fallback if the private point-anchored presentation ever disappears.
+    private func presentAsSheet(at location: CGPoint) {
+        guard let view, let presenter = view.window?.ak_topViewController else { return }
+        let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        for item in menu.items where !item.isSeparatorItem && !item.isHidden && item.isEnabled {
+            sheet.addAction(UIAlertAction(title: item.attributedTitle?.string ?? item.title, style: .default) { _ in item.perform() })
+        }
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = CGRect(origin: location, size: .zero)
+        presenter.present(sheet, animated: true)
     }
 
     func contextMenuInteraction(

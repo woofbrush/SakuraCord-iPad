@@ -24,6 +24,10 @@ public final class NSApplication: NSObject {
     public static let willTerminateNotification = UIApplication.willTerminateNotification
 
     public var delegate: AnyObject?
+
+    /// Lets app-level key equivalents win over UIKit's text-editing shortcuts,
+    /// which on iPadOS otherwise take priority for chords like Option-Up Arrow.
+    public var textKeyEquivalentHandler: ((NSEvent) -> Bool)?
     public var mainMenu: NSMenu?
     public let dockTile = NSDockTile()
 
@@ -198,7 +202,9 @@ public extension UIScreen {
 }
 
 public extension Bundle {
-    func image(forResource name: String) -> UIImage? { UIImage(named: name, in: self, compatibleWith: nil) }
+    func image(forResource name: String) -> UIImage? {
+        UIImage(named: name, in: self, compatibleWith: nil)?.withRenderingMode(.alwaysTemplate)
+    }
     func path(forSoundResource name: String) -> String? { path(forResource: name, ofType: "mp3") }
 }
 

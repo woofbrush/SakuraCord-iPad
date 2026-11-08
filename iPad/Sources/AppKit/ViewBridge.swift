@@ -16,7 +16,7 @@ extension UIView {
     @objc(ak_viewDidUnhide) open func viewDidUnhide() {}
     @objc(ak_updateTrackingAreas) open func updateTrackingAreas() {}
     @objc(ak_resetCursorRects) open func resetCursorRects() {}
-    @objc(ak_isFlipped) open var isFlipped: Bool { false }
+    @objc(ak_isFlipped) open var isFlipped: Bool { true }
     @objc(ak_acceptsFirstMouse:) open func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
     @objc(ak_acceptsFirstResponder) open var acceptsFirstResponder: Bool { false }
 
@@ -166,7 +166,14 @@ extension UIView {
         get { objc_getAssociatedObject(self, &ViewBridge.postsChangesKey) != nil }
         set { objc_setAssociatedObject(self, &ViewBridge.postsChangesKey, newValue ? true : nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
     }
-    public var fittingSize: CGSize { systemLayoutSizeFitting(UIView.layoutFittingCompressedSize) }
+    public var fittingSize: CGSize {
+        guard bounds.width > 0 else { return systemLayoutSizeFitting(UIView.layoutFittingCompressedSize) }
+        return systemLayoutSizeFitting(
+            CGSize(width: bounds.width, height: 0),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel
+        )
+    }
 
     public func sortSubviews(
         _ compare: @convention(c) (UIView, UIView, UnsafeMutableRawPointer?) -> ComparisonResult,
@@ -257,8 +264,29 @@ public extension NSView {
 enum ViewBridge {
     nonisolated(unsafe) private static var trackingKey: UInt8 = 0
     nonisolated(unsafe) static var postsChangesKey: UInt8 = 0
+    nonisolated(unsafe) private static var lastSizeKey: UInt8 = 0
+    private static var isApplyingFrameSize = false
+
+    static func sizeChanged(_ view: UIView) -> Bool {
+        let size = view.bounds.size
+        let previous = (objc_getAssociatedObject(view, &lastSizeKey) as? NSValue)?.cgSizeValue
+        guard previous != size else { return false }
+        objc_setAssociatedObject(view, &lastSizeKey, NSValue(cgSize: size), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return true
+    }
+
+    /// AppKit routes every resize through setFrameSize(_:); UIKit only sets the frame.
+    static func frameDidChange(_ view: UIView, from oldSize: CGSize) {
+        guard oldSize != view.frame.size else { return }
+        (view.superview as? NSScrollView)?.documentFrameDidChange(view)
+        guard !isApplyingFrameSize, overrides(view, #selector(UIView.setFrameSize(_:)), base: UIView.self) else { return }
+        isApplyingFrameSize = true
+        view.setFrameSize(view.frame.size)
+        isApplyingFrameSize = false
+    }
     nonisolated(unsafe) private static var hoverKey: UInt8 = 0
     nonisolated(unsafe) private static var scrollKey: UInt8 = 0
+    nonisolated(unsafe) private static var pressKey: UInt8 = 0
     private static var originalHitTest: (@convention(c) (UIView, Selector, CGPoint, UIEvent?) -> UIView?)?
 
     static func tracking(of view: UIView) -> [NSTrackingArea] {
@@ -298,15 +326,43 @@ enum ViewBridge {
         objc_setAssociatedObject(view, &scrollKey, pan, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    /// Touch has no secondary click, so a long press opens the same context menus.
+    static func installContextMenuPress(on view: UIView) {
+        guard objc_getAssociatedObject(view, &pressKey) == nil else { return }
+        let press = UILongPressGestureRecognizer(target: PointerRouter.shared, action: #selector(PointerRouter.contextPress(_:)))
+        press.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        view.addGestureRecognizer(press)
+        objc_setAssociatedObject(view, &pressKey, press, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private static var appClasses: [ObjectIdentifier: Bool] = [:]
+
+    private static func isAppClass(_ type: AnyClass) -> Bool {
+        let key = ObjectIdentifier(type)
+        if let known = appClasses[key] { return known }
+        let isApp = Bundle(for: type).bundlePath == Bundle.main.bundlePath
+        appClasses[key] = isApp
+        return isApp
+    }
+
     // MARK: Lifecycle
 
     static func prepareForDisplay(_ view: UIView) {
-        if overrides(view, #selector(UIView.draw(_:)), base: UIView.self) {
+        // Only the app's own views: UIKit's drawing views manage their own opacity.
+        if isAppClass(type(of: view)), overrides(view, #selector(UIView.draw(_:)), base: UIView.self) {
             view.isOpaque = false
             view.contentMode = .redraw
         }
-        if overrides(view, #selector(UIResponder.scrollWheel(with:)), base: UIResponder.self) {
+        if overrides(view, #selector(UIResponder.scrollWheel(with:)), base: UIResponder.self), !(view is UIScrollView) {
             installScrollWheel(on: view)
+        }
+        if overrides(view, #selector(UIView.menu(for:)), base: UIView.self) {
+            installContextMenuPress(on: view)
+        }
+        if overrides(view, #selector(UIView.viewDidChangeEffectiveAppearance), base: UIView.self) {
+            view.registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: UIView, _: UITraitCollection) in
+                view.viewDidChangeEffectiveAppearance()
+            }
         }
     }
 
@@ -324,6 +380,9 @@ enum ViewBridge {
             (view, #selector(UIView.layoutSubviews), #selector(UIView.ak_swizzled_layoutSubviews)),
             (view, #selector(UIView.didMoveToWindow), #selector(UIView.ak_swizzled_didMoveToWindow)),
             (view, #selector(UIView.didMoveToSuperview), #selector(UIView.ak_swizzled_didMoveToSuperview)),
+            (view, #selector(UIView.willMove(toWindow:)), #selector(UIView.ak_swizzled_willMove(toWindow:))),
+            (view, #selector(setter: UIView.frame), #selector(UIView.ak_swizzled_setFrame(_:))),
+            (UIWindow.self, #selector(UIView.safeAreaInsetsDidChange), #selector(UIWindow.ak_swizzled_safeAreaInsetsDidChange)),
             (view, #selector(UIView.hitTest(_:with:)), #selector(UIView.ak_swizzled_hitTest(_:with:))),
             (view, #selector(UIResponder.touchesBegan(_:with:)), #selector(UIView.ak_swizzled_touchesBegan(_:with:))),
             (view, #selector(UIResponder.touchesMoved(_:with:)), #selector(UIView.ak_swizzled_touchesMoved(_:with:))),
@@ -350,10 +409,24 @@ extension UIView {
     @objc func ak_swizzled_layoutSubviews() {
         ak_swizzled_layoutSubviews()
         layout()
+        if ViewBridge.overrides(self, #selector(UIView.updateTrackingAreas), base: UIView.self), ViewBridge.sizeChanged(self) {
+            updateTrackingAreas()
+        }
         if postsFrameChangedNotifications {
             NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: self)
             NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: self)
         }
+    }
+
+    @objc func ak_swizzled_setFrame(_ frame: CGRect) {
+        let oldSize = self.frame.size
+        ak_swizzled_setFrame(frame)
+        ViewBridge.frameDidChange(self, from: oldSize)
+    }
+
+    @objc func ak_swizzled_willMove(toWindow newWindow: UIWindow?) {
+        ak_swizzled_willMove(toWindow: newWindow)
+        viewWillMove(toWindow: newWindow)
     }
 
     @objc func ak_swizzled_didMoveToWindow() {
@@ -485,6 +558,14 @@ extension UIApplication {
 }
 
 extension UIWindow {
+    /// The inset the Mac title-bar metrics sit below: the status bar in full screen, none in a window.
+    public nonisolated(unsafe) static var ak_chromeTopInset: CGFloat = 0
+
+    @objc func ak_swizzled_safeAreaInsetsDidChange() {
+        ak_swizzled_safeAreaInsetsDidChange()
+        UIWindow.ak_chromeTopInset = safeAreaInsets.top
+    }
+
     @objc func ak_swizzled_sendEvent(_ event: UIEvent) {
         if event.type == .touches, let touch = event.allTouches?.first {
             let location = touch.location(in: nil)
@@ -545,6 +626,15 @@ final class PointerRouter: NSObject {
                 target.mouseMoved(with: event)
             }
         }
+    }
+
+    @objc func contextPress(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began, let view = recognizer.view else { return }
+        let location = recognizer.location(in: nil)
+        NSEvent.lastLocation = location
+        let event = NSEvent(type: .rightMouseDown, location: location, window: view.window, clickCount: 1, buttonNumber: 1)
+        NSEvent.current = event
+        view.menu(for: event)?.popUp(at: recognizer.location(in: view), in: view)
     }
 
     @objc func scroll(_ recognizer: UIPanGestureRecognizer) {

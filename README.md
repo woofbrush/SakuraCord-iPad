@@ -119,7 +119,7 @@ explains how to collect a support summary and sanitized diagnostics. Use the
 | Path | Purpose |
 | --- | --- |
 | `App/` | Native macOS application and plugin-host targets |
-| `iPad/` | iPadOS app built with xtool from the shared packages ([build](docs/DEVELOPMENT.md#ipados-app)) |
+| `iPad/` | iPadOS build of the app, compiled with xtool ([build](docs/DEVELOPMENT.md#ipados-app)) |
 | `Packages/` | Models, Discord protocol, persistence, message rendering, media, and plugin contracts |
 | `Brand/` | Logos, banners, and brand metadata |
 | `Config/` | Application entitlements |

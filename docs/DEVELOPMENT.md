@@ -184,21 +184,26 @@ has a 30-minute outer limit covering compilation and framework staging.
 
 ### iPadOS app
 
-`iPad/` is an [xtool](https://github.com/xtool-org/xtool) SwiftPM project, so it
-builds on macOS, Linux or WSL once `xtool setup` has installed the Darwin SDK:
+`iPad/` compiles the macOS app's own sources for iPadOS with
+[xtool](https://github.com/xtool-org/xtool), so the two share their views,
+layout and models. It builds on macOS, Linux or WSL once `xtool setup` has
+installed the Darwin SDK:
 
 ```sh
-cd iPad
-xtool dev build -c release --ipa   # writes xtool/SakuraCordPad.ipa
-xtool dev                          # build, sign and run on a connected iPad
+iPad/build.sh               # writes iPad/xtool/SakuraCordPad.ipa
 ```
 
-It requires iPadOS 27 and shares SakuraCordModels, DiscordProtocol and
-MessageRendering with the Mac app. `iPad/Sources/SakuraCordPad/Shared/`
-symlinks the Mac app's sign-in services rather than copying them, so check out
-with symlinks enabled. Voice, uploads, plugins and updates remain macOS-only.
-`iPad/Resources/AppIcon.png` is the brand icon re-rendered full-bleed for the
-iPadOS icon mask.
+`iPad/tools/sync_sources.py` generates `iPad/Sources/SakuraCord/Generated` from
+`App/Sources/SakuraCord`, applying its syntax rewrites; run by `build.sh`.
+`iPad/Sources/AppKit` implements the AppKit API the app uses on top of UIKit,
+including the event routing behind `mouseDown`, `keyDown` and tracking areas.
+A file in `iPad/Overrides/` replaces the macOS file of the same path where the
+platforms genuinely differ, such as the app entry point. New AppKit use in
+`App/` may need a matching addition to `iPad/Sources/AppKit`.
+
+Screen sharing, updates and plugins remain macOS-only. Custom symbols are
+rendered by `iPad/tools/render_symbols.py` because `actool` needs macOS; the
+sign-in shaders compile on the device for the same reason.
 
 ### Profiling command pickers
 

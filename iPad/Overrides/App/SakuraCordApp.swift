@@ -37,6 +37,16 @@ struct SakuraCordApp: App {
         InterfaceScale.shared.update(appModel.appearanceSettings.interfaceSize)
         _model = State(initialValue: appModel)
         UNUserNotificationCenter.current().delegate = appDelegate.notificationCenterDelegate
+        NSApp.textKeyEquivalentHandler = { [weak appModel] event in
+            guard let appModel, let chord = KeyboardShortcutChord(event: event),
+                  let action = KeyboardShortcutAction.allCases.first(where: {
+                      KeyboardShortcutSettingsStore.shared.shortcut(for: $0) == chord
+                  }),
+                  appModel.keyboardShortcutActionIsEnabled(action)
+            else { return false }
+            appModel.performKeyboardShortcutAction(action)
+            return true
+        }
     }
 
     var body: some Scene {
