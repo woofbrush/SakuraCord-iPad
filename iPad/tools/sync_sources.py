@@ -152,7 +152,16 @@ FILE_RULES = {
         (re.compile(r"[.]navigationSplitViewColumnWidth\(\s*min: ChatChromeMetrics[.]serverRailWidth"),
          lambda m: ".toolbar(removing: .sidebarToggle)\n            .toolbar { ToolbarItem(placement: .topBarTrailing) { padSidebarToggle } }\n            " + m.group(0)),
         (re.compile(r"[.]toolbar [{]\s*detailToolbar\s*[}]"),
-         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n            }"),
+         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible ? .visible : .hidden)\n            }"),
+        (re.compile(r"\n +[.]modifier\(MessageSearchToolbarModifier\(\s*model: model,\s*search: search,\s*prompt: prompt\s*\)\)"), ""),
+        # Below the real toolbar row: on iPadOS that row is inside the split view, not above the root.
+        (re.compile(r"[.]padding\([.]trailing, toolbarMetrics[.]trailingInset\)"),
+         ".onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { PadToolbarSearch.shared.autocompleteFrame = $0 }\n                    .padding(.trailing, toolbarMetrics.trailingInset)\n                    .padding(.top, toolbarMetrics.bottomInset)\n                    .ignoresSafeArea()"),
+        # A background on a toolbar button is not dependably installed on iPadOS, so the
+        # panels anchor from outside the toolbar, under their buttons.
+        (re.compile(r"\s*[.]background [{]\s*StableAnchoredPopoverPresenter\(\s*isPresented: model[.](?:inbox|pinnedMessages)[.]isPresented,.*?[.]frame\(maxWidth: [.]infinity, maxHeight: [.]infinity\)\s*[}]", re.S), ""),
+        (re.compile(r"([.]overlay\(alignment: [.]topLeading\) [{]\s*ZStack\(alignment: [.]topLeading\) [{]\s*SakuraCordTextInputAccentBridge)"),
+         lambda m: ".overlay(alignment: .topTrailing) { padToolbarPanels }\n        " + m.group(1)),
         (re.compile(r"(    @ViewBuilder private var workspace: some View [{])"),
          lambda m: """    private var padSidebarToggle: some View {
         Button {
@@ -162,7 +171,51 @@ FILE_RULES = {
         }
     }
 
+    private var padToolbarPanels: some View {
+        let searchEdge = toolbarSearchFieldMetrics.trailingInset + ChatChromeMetrics.toolbarSearchMaximumFieldWidth
+        return ZStack(alignment: .topTrailing) {
+            StableAnchoredPopoverPresenter(
+                isPresented: model.inbox.isPresented,
+                configuration: .toolbarPanel,
+                onDismiss: model.dismissInbox
+            ) { InboxPopoverView(model: model) }
+            .frame(width: 44, height: 1)
+            .padding(.trailing, searchEdge + 105)
+
+            StableAnchoredPopoverPresenter(
+                isPresented: model.pinnedMessages.isPresented,
+                configuration: .toolbarPanel,
+                onDismiss: model.dismissPinnedMessages
+            ) { PinnedMessagesPopoverView(model: model) }
+            .frame(width: 44, height: 1)
+            .padding(.trailing, searchEdge + 57)
+        }
+        .padding(.top, toolbarSearchFieldMetrics.bottomInset)
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
 """ + m.group(1)),
+    ],
+    # The search field is a UITextField, which macOS's check would miss, sending typing to the composer.
+    "ComposerTextView.swift": [
+        (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),
+         "guard let textView = responder as? NSTextView else { return responder is UITextField }"),
+        (re.compile(r"private func readAttachments\(from pasteboard: NSPasteboard\) -> Bool [{].*?\n    [}]\n", re.S),
+         """private func readAttachments(from _: NSPasteboard) -> Bool {
+        guard receivesAttachments, let onReceiveAttachments else { return false }
+        let providers = PadPasteboardAttachments.providers()
+        guard !providers.isEmpty else { return false }
+        PadPasteboardAttachments.receive(providers) { batch in
+            if !onReceiveAttachments(.owned(batch), false) { batch.discard() }
+        }
+        return true
+    }
+
+    override func paste(_ sender: Any?) {
+        if !readAttachments(from: .general) { super.paste(sender) }
+    }
+"""),
     ],
     "InterfaceScale.swift": [
         (re.compile(r"let isDefault = InterfaceScale[.]factor == 1 [|][|] isNested"), "let isDefault = isNested"),
@@ -170,7 +223,7 @@ FILE_RULES = {
         (re.compile(r"guard InterfaceScale[.]factor != 1 else [{]\s*return [.]system\(style, design: design, weight: weight\)\s*[}]\s*"), ""),
     ],
     "ChatChromeMetrics.swift": [
-        (re.compile(r"static let sidebarTitleCenterY: CGFloat = 25"), "static var sidebarTitleCenterY: CGFloat { 25 + UIWindow.ak_chromeTopInset }"),
+        (re.compile(r"static let sidebarTitleCenterY: CGFloat = 25"), "static var sidebarTitleCenterY: CGFloat { UIWindow.ak_toolbarCenterY }"),
     ],
     "SakuraCordSignInExperience.swift": [
         (re.compile(r"Rectangle\(\)\s*[.]fill\(colorScheme == [.]dark [?] Color\(hex: 0x101018\) : Color\(hex: 0xF6F5FA\)\)\s*[.]colorEffect\(ShaderLibrary[.]bundle\([.]module\)[.]sakuraSignInLight\(.*?\)\)\n", re.S),

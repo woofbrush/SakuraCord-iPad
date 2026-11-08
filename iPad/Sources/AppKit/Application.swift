@@ -402,7 +402,7 @@ public final class NSPasteboard: NSObject {
     }
 
     public func availableType(from types: [PasteboardType]) -> PasteboardType? {
-        types.first { board.contains(pasteboardTypes: [$0.rawValue]) }
+        types.first { $0 == .string ? board.hasStrings : board.contains(pasteboardTypes: [$0.rawValue]) }
     }
 
     public var types: [PasteboardType]? { board.types.map(PasteboardType.init(rawValue:)) }

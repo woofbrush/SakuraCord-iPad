@@ -2,8 +2,9 @@ import AppKit
 import SakuraCordModels
 import SwiftUI
 
-// macOS reads NSToolbar's search item to size the results panel. iPadOS has no
-// NSToolbar; SwiftUI's `.searchable` owns the field, so only its metrics remain.
+// macOS reads NSToolbar's search item. On iPadOS `.searchable` treats losing focus as
+// ending the search and erases the text, so a plain toolbar field keeps the macOS
+// meaning: focus only decides whether suggestions are showing.
 
 struct ToolbarSearchFieldLoadingStyler: View {
     let isActive: Bool
@@ -16,6 +17,8 @@ struct ToolbarSearchFieldMetrics: Equatable {
 
     let fieldWidth: CGFloat
     let trailingInset: CGFloat
+    var bottomInset: CGFloat = 0
+    var toolbarCenterY: CGFloat = 0
 
     var isValid: Bool {
         fieldWidth.isFinite
@@ -23,6 +26,15 @@ struct ToolbarSearchFieldMetrics: Equatable {
             && fieldWidth > 0
             && trailingInset >= 0
     }
+}
+
+@Observable
+final class PadToolbarSearch {
+    static let shared = PadToolbarSearch()
+
+    var isVisible = false
+    var metrics = ToolbarSearchFieldMetrics.zero
+    @ObservationIgnored var autocompleteFrame = CGRect.null
 }
 
 struct ToolbarSearchFieldGeometryReader: View {
@@ -39,8 +51,211 @@ struct ToolbarSearchFieldGeometryReader: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .onChange(of: preferredFieldWidth, initial: true) { _, width in
-                changed(ToolbarSearchFieldMetrics(fieldWidth: width, trailingInset: 16))
+            .onChange(of: isToolbarItemVisible, initial: true) { _, isVisible in
+                PadToolbarSearch.shared.isVisible = isVisible
             }
+            .onChange(of: PadToolbarSearch.shared.metrics) { _, metrics in
+                changed(metrics)
+            }
+    }
+}
+
+/// Stays in the toolbar while search is hidden, because it also measures the toolbar
+/// row that the sidebar title lines up with.
+struct PadToolbarSearchField: View {
+    let model: AppModel
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        if PadToolbarSearch.shared.isVisible {
+            field
+        } else {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .background { PadSearchFieldAnchor(isFocused: false, endEditing: {}, deleteLastToken: { false }) }
+        }
+    }
+
+    private var field: some View {
+        @Bindable var model = model
+        @Bindable var search = model.messageSearch
+        @Bindable var onboarding = model.onboarding
+        let local = model.isBrowsingGuildChannels
+        let tokens = local ? [] : search.tokens
+        let text = local ? onboarding.channelSearch : search.queryText
+        let wantsFocus = local ? onboarding.isChannelSearchFocused : search.isInputFocused
+        return HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+            ForEach(tokens.suffix(2)) { chip($0) }
+            TextField(
+                "",
+                text: local ? $onboarding.channelSearch : $model.messageSearchInputText,
+                prompt: Text(local ? "Search Channels" : model.messageSearchPromptTitle)
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .focused($isFocused)
+            .submitLabel(.search)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .onSubmit {
+                if !local { model.submitMessageSearchInput() }
+            }
+            if !text.isEmpty || !tokens.isEmpty {
+                Button {
+                    if local { onboarding.channelSearch = "" } else { model.clearMessageSearchUsingBuiltInButton() }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: ChatChromeMetrics.toolbarSearchMaximumFieldWidth, height: 38)
+        .contentShape(.rect)
+        .onTapGesture { isFocused = true }
+        .background {
+            PadSearchFieldAnchor(
+                isFocused: isFocused,
+                endEditing: { isFocused = false },
+                deleteLastToken: {
+                    guard !local, search.queryText.isEmpty, !search.tokens.isEmpty else { return false }
+                    search.tokens.removeLast()
+                    return true
+                }
+            )
+        }
+        .onChange(of: wantsFocus, initial: true) { _, wanted in
+            if isFocused != wanted { isFocused = wanted }
+        }
+        .onChange(of: isFocused) { _, focused in
+            if local {
+                onboarding.isChannelSearchFocused = focused
+            } else if focused {
+                search.isInputFocused = true
+            } else {
+                model.messageSearchEditingDidEnd()
+            }
+        }
+    }
+
+    private func chip(_ token: MessageSearchToken) -> some View {
+        Button {
+            model.messageSearch.tokens.removeAll { $0 == token }
+        } label: {
+            Text(token.title)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: 80)
+    }
+}
+
+/// Reports the field's place in the window, and supplies what the macOS field editor
+/// does on its own: clicking elsewhere ends editing, Backspace removes a token.
+private struct PadSearchFieldAnchor: NSViewRepresentable {
+    let isFocused: Bool
+    let endEditing: () -> Void
+    let deleteLastToken: () -> Bool
+
+    func makeNSView(context: Context) -> AnchorView { AnchorView() }
+
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.endEditing = endEditing
+        view.deleteLastToken = deleteLastToken
+        view.fieldIsFocused = isFocused
+        view.scheduleReport()
+    }
+
+    static func dismantleNSView(_ view: AnchorView, coordinator: ()) {
+        view.stopObserving()
+    }
+
+    final class AnchorView: NSView {
+        var endEditing: () -> Void = {}
+        var deleteLastToken: () -> Bool = { false }
+        var fieldIsFocused = false {
+            didSet { if fieldIsFocused != oldValue { synchronizeMonitors() } }
+        }
+        private var mouseMonitor: Any?
+        private var keyMonitor: Any?
+        private var chromeObserver: NSObjectProtocol?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func layout() {
+            super.layout()
+            scheduleReport()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            synchronizeMonitors()
+            scheduleReport()
+            guard chromeObserver == nil else { return }
+            // Entering or leaving full screen moves the toolbar without resizing this view.
+            chromeObserver = NotificationCenter.default.addObserver(
+                forName: UIWindow.ak_safeAreaDidChange, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.report() }
+                }
+            }
+        }
+
+        func scheduleReport() {
+            DispatchQueue.main.async { [weak self] in self?.report() }
+        }
+
+        func stopObserving() {
+            removeMonitors()
+            if let chromeObserver { NotificationCenter.default.removeObserver(chromeObserver) }
+            chromeObserver = nil
+        }
+
+        private func report() {
+            guard let window, !bounds.isEmpty else { return }
+            let frame = convert(bounds, to: nil)
+            UIWindow.ak_toolbarCenterY = frame.midY
+            let metrics = ToolbarSearchFieldMetrics(
+                fieldWidth: frame.width,
+                trailingInset: max(0, window.bounds.maxX - frame.maxX),
+                bottomInset: frame.maxY,
+                toolbarCenterY: frame.midY
+            )
+            if PadToolbarSearch.shared.metrics != metrics {
+                PadToolbarSearch.shared.metrics = metrics
+            }
+        }
+
+        private func removeMonitors() {
+            if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            mouseMonitor = nil
+            keyMonitor = nil
+        }
+
+        private func synchronizeMonitors() {
+            removeMonitors()
+            guard fieldIsFocused, window != nil else { return }
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self else { return event }
+                if !bounds.contains(convert(event.locationInWindow, from: nil)),
+                   !PadToolbarSearch.shared.autocompleteFrame.contains(event.locationInWindow)
+                {
+                    endEditing()
+                }
+                return event
+            }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                event.keyCode == 51 && self?.deleteLastToken() == true ? nil : event
+            }
+        }
     }
 }

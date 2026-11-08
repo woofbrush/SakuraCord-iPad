@@ -151,6 +151,20 @@ open class NSTextView: UITextView, UITextViewDelegate {
 
     open var readablePasteboardTypes: [NSPasteboard.PasteboardType] { [.string] }
     open func readSelection(from _: NSPasteboard, type _: NSPasteboard.PasteboardType) -> Bool { false }
+
+    override open func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) { return isEditable && UIPasteboard.general.numberOfItems > 0 }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    /// AppKit's route: the first readable type this view accepts.
+    override open func paste(_ sender: Any?) {
+        let pasteboard = NSPasteboard.general
+        for type in readablePasteboardTypes where pasteboard.availableType(from: [type]) != nil {
+            if readSelection(from: pasteboard, type: type) { return }
+        }
+        super.paste(sender)
+    }
     @objc open func validateMenuItem(_: NSMenuItem) -> Bool { true }
 
     @objc open dynamic func shouldChangeText(in range: NSRange, replacementString string: String?) -> Bool {
@@ -239,6 +253,11 @@ open class NSTextView: UITextView, UITextViewDelegate {
         if !event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
             if NSApp.textKeyEquivalentHandler?(event) == true { return }
             if performKeyEquivalent(with: event) { return }
+            if event.modifierFlags.intersection([.command, .option, .control]) == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "v" {
+                paste(nil)
+                return
+            }
         }
         if let selector = TextCommands.selector(for: event), handle(selector) { return }
         isHandlingHardwareNewline = event.keyCode == 36

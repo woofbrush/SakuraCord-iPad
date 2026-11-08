@@ -596,12 +596,14 @@ extension UIApplication {
 }
 
 extension UIWindow {
-    /// The inset the Mac title-bar metrics sit below: the status bar in full screen, none in a window.
-    public nonisolated(unsafe) static var ak_chromeTopInset: CGFloat = 0
+    /// Window-space centre of the toolbar row. The system places that row differently
+    /// in a window and in full screen, so the toolbar search field measures it.
+    public nonisolated(unsafe) static var ak_toolbarCenterY: CGFloat = 27
+    public static let ak_safeAreaDidChange = Notification.Name("AKWindowSafeAreaDidChange")
 
     @objc func ak_swizzled_safeAreaInsetsDidChange() {
         ak_swizzled_safeAreaInsetsDidChange()
-        UIWindow.ak_chromeTopInset = safeAreaInsets.top
+        NotificationCenter.default.post(name: UIWindow.ak_safeAreaDidChange, object: self)
         if let style = NSApp.appearance?.style { overrideUserInterfaceStyle = style }
         AppearanceState.style = traitCollection.userInterfaceStyle
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (window: UIWindow, _: UITraitCollection) in
