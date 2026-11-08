@@ -20,7 +20,8 @@ FOLDERS = ["App", "Models", "Services", "Support", "Views"]
 NON_OPTIONAL = r"layer|textStorage|layoutManager|textContainer"
 REMOVED_IMPORTS = re.compile(r"^(@preconcurrency )?import (Sparkle|ServiceManagement)\n", re.M)
 RULES = [
-    (re.compile(r"\b(\w*[sS]crollView[?]?)[.]contentSize\b"), lambda m: f"{m.group(1)}.nsContentSize"),
+    (re.compile(r"\b(\w*[sS]croll(?:View)?[?]?)[.]contentSize\b"), lambda m: f"{m.group(1)}.nsContentSize"),
+    (re.compile(r"\bproposal[.](width|height) *[?][?]"), lambda m: f"proposal.finite{m.group(1).capitalize()} ??"),
     (re.compile(r"\bCTLineCreateWithAttributedString\("), "AKCTLineCreate("),
     (re.compile(r"\bCTFramesetterCreateWithAttributedString\("), "AKCTFramesetterCreate("),
     (re.compile(r"\bCTTypesetterCreateWithAttributedString\("), "AKCTTypesetterCreate("),
@@ -98,6 +99,9 @@ RULES = [
 
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
+    "NativeTimelineCanvasInteractions.swift": [
+        (re.compile(r"guard let hit,\n(\s+)let reaction = hit[.]reaction,"), lambda m: f"guard isFrontmostAtPointer,\n{m.group(1)}let hit,\n{m.group(1)}let reaction = hit.reaction,"),
+    ],
     # arrowEdge means the anchor's edge on macOS but the popover's edge on iOS, where
     # it is also strict: a popover forced toward a window edge collapses. Without it,
     # iPadOS picks a side that fits, as macOS does when the requested side has no room.

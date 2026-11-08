@@ -29,6 +29,13 @@ public extension NSAttributedString.Key {
 /// AppKit's route: keyDown, then doCommandBy on the delegate, then default editing.
 open class NSTextView: UITextView, UITextViewDelegate {
     public weak var nsDelegate: NSTextViewDelegate?
+
+    /// SwiftUI may propose an infinite width; AppKit tolerates that frame, CALayer throws.
+    override open var frame: CGRect {
+        get { super.frame }
+        set { super.frame = newValue.ak_validated(fallback: super.frame) }
+    }
+
     public var isRichText = true
     public var importsGraphics = false
     public var allowsUndo = true

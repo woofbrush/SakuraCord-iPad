@@ -638,6 +638,48 @@ extension UIWindow {
 }
 
 /// Target for the gesture recognizers that synthesize hover and scroll-wheel events.
+extension CGRect {
+    /// Replaces any component a CALayer would reject with the matching one from `fallback`.
+    func ak_validated(fallback: CGRect) -> CGRect {
+        func valid(_ value: CGFloat, _ replacement: CGFloat) -> CGFloat {
+            value.isFinite && abs(value) < 1_000_000 ? value : replacement
+        }
+        return CGRect(
+            x: valid(origin.x, fallback.origin.x),
+            y: valid(origin.y, fallback.origin.y),
+            width: valid(size.width, fallback.size.width),
+            height: valid(size.height, fallback.size.height)
+        )
+    }
+}
+
+extension UIView {
+    /// The part of the window standing in for one AppKit window: a popover overlay,
+    /// a presented sheet or popover, or the main content.
+    fileprivate var ak_windowLayer: UIView {
+        var top: UIView = self
+        while let parent = top.superview, !(parent is UIWindow), !(top is PopoverContainerView) {
+            top = parent
+        }
+        return top
+    }
+
+    /// AppKit only tracks the pointer in the window under it; UIKit hover recognizers
+    /// fire through popovers and sheets that are in the same window.
+    fileprivate func ak_isCovered(atWindowPoint point: CGPoint) -> Bool {
+        guard !trackingAreas.isEmpty, let window, let hit = window.hitTest(point, with: nil),
+              hit !== self, !hit.isDescendant(of: self)
+        else { return false }
+        return hit.ak_windowLayer !== ak_windowLayer
+    }
+
+    /// True when nothing, in any layer, is above this view at the pointer.
+    public var isFrontmostAtPointer: Bool {
+        guard let window, let hit = window.hitTest(NSEvent.lastLocation, with: nil) else { return true }
+        return hit === self || hit.isDescendant(of: self)
+    }
+}
+
 final class PointerRouter: NSObject {
     static let shared = PointerRouter()
 
@@ -647,7 +689,8 @@ final class PointerRouter: NSObject {
         let windowLocation = recognizer.location(in: nil)
         NSEvent.lastLocation = windowLocation
         NSEvent.currentModifiers = NSEvent.ModifierFlags(recognizer.modifierFlags)
-        let isOver = recognizer.state == .began || recognizer.state == .changed
+        let isOver = (recognizer.state == .began || recognizer.state == .changed)
+            && !view.ak_isCovered(atWindowPoint: windowLocation)
         for area in view.trackingAreas {
             let rect = area.options.contains(.inVisibleRect) ? view.bounds : area.rect
             let isInside = isOver && rect.contains(location)

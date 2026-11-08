@@ -96,3 +96,10 @@ public struct NSOpenSettingsAction: Sendable {
 public extension EnvironmentValues {
     var nsOpenSettings: NSOpenSettingsAction { NSOpenSettingsAction() }
 }
+
+
+public extension ProposedViewSize {
+    /// AppKit representables treat the proposal as a frame; an infinite one is invalid here.
+    nonisolated var finiteWidth: CGFloat? { width.flatMap { $0.isFinite ? $0 : nil } }
+    nonisolated var finiteHeight: CGFloat? { height.flatMap { $0.isFinite ? $0 : nil } }
+}

@@ -28,6 +28,11 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
     public var verticalScrollElasticity: Elasticity = .automatic { didSet { alwaysBounceVertical = verticalScrollElasticity == .allowed } }
     public var horizontalScrollElasticity: Elasticity = .automatic { didSet { bounces = horizontalScrollElasticity != .none || verticalScrollElasticity != .none } }
 
+    override open var frame: CGRect {
+        get { super.frame }
+        set { super.frame = newValue.ak_validated(fallback: super.frame) }
+    }
+
     public var contentView: NSClipView { self }
     public var verticalScroller: UIView? { nil }
     public var horizontalScroller: UIView? { nil }

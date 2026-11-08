@@ -331,7 +331,7 @@ public extension CGRectEdge {
 
 /// Glass surface for a popover. Touches on its chrome pass through, so a popover
 /// whose content ignores input (a hover card) never blocks the view beneath it.
-private final class PopoverContainerView: UIView {
+final class PopoverContainerView: UIView {
     let effect = UIVisualEffectView(effect: UIGlassEffect())
 
     override init(frame: CGRect) {
