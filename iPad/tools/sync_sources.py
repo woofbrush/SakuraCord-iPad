@@ -98,6 +98,12 @@ RULES = [
 
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
+    # arrowEdge means the anchor's edge on macOS but the popover's edge on iOS, where
+    # it is also strict: a popover forced toward a window edge collapses. Without it,
+    # iPadOS picks a side that fits, as macOS does when the requested side has no room.
+    "ServerTagCard.swift": [
+        (re.compile(r"[.]popover\(isPresented: [$]isPresented, arrowEdge: [.]bottom\)"), ".popover(isPresented: $isPresented)"),
+    ],
     "NativeMemberListViewBridge.swift": [
         (re.compile(r"width: max\(0, contentSize[.]width\)"), "width: max(0, nsContentSize.width)"),
     ],
@@ -106,6 +112,7 @@ FILE_RULES = {
          "popover.contentViewController?.view.isUserInteractionEnabled = !configuration.ignoresMouseEvents"),
     ],
     "PopoverEscapeKeyCoordinator.swift": [
+        (re.compile(r"arrowEdge: arrowEdge\n"), "arrowEdge: nil\n"),
         (re.compile(r"^( +)(content\((?:value)?\))\n( +)[.]background [{]", re.M),
          lambda m: f"{m.group(1)}{m.group(2)}\n{m.group(3)}.fixedSize()\n{m.group(3)}.presentationCompactAdaptation(.popover)\n{m.group(3)}.background {{"),
     ],
