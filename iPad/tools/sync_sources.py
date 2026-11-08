@@ -20,6 +20,8 @@ FOLDERS = ["App", "Models", "Services", "Support", "Views"]
 NON_OPTIONAL = r"layer|textStorage|layoutManager|textContainer"
 REMOVED_IMPORTS = re.compile(r"^(@preconcurrency )?import (Sparkle|ServiceManagement)\n", re.M)
 RULES = [
+    (re.compile(r"^(@preconcurrency )?import AppKit$", re.M), "import AppKitShim"),
+    (re.compile(r"\bAppKit[.]"), "AppKitShim."),
     (re.compile(r"\[[.]withSecurityScope[^\]]*\]"), "[]"),
     (re.compile(rf"\b({NON_OPTIONAL})\?(?=[.\[])"), r"\1"),
     (re.compile(r"\.selectedRange\(\)"), ".nsSelectedRange()"),
@@ -91,6 +93,29 @@ RULES = [
 
 # UIView already has a `contentMode`; this view's own property means SwiftUI's.
 FILE_RULES = {
+    "NativeMemberListCanvasView.swift": [
+        (re.compile(r"override func draw\(_ dirtyRect: NSRect\) [{]"), "func drawCanvas(_ dirtyRect: NSRect) {"),
+        (re.compile(r"(    override func updateTrackingAreas\(\) [{])"), lambda m: """    private lazy var viewportBacking: NSViewportBackingView = {
+        let backing = NSViewportBackingView(frame: .zero)
+        backing.drawContent = { [weak self] rect in self?.drawCanvas(rect) }
+        return backing
+    }()
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        viewportBacking.attach(to: self)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        viewportBacking.reposition()
+    }
+
+    override func setNeedsDisplay() { viewportBacking.invalidate(nil) }
+    override func setNeedsDisplay(_ rect: CGRect) { viewportBacking.invalidate(rect) }
+
+""" + m.group(1)),
+    ],
     "DiscordCaptchaPresentation.swift": [
         (re.compile(r'webView[.]setValue\(false, forKey: "drawsBackground"\)'), "webView.isOpaque = false; webView.backgroundColor = .clear; webView.scrollView.backgroundColor = .clear"),
     ],
@@ -187,7 +212,7 @@ def transform(text: str, name: str = "") -> str:
         text = pattern.sub(replacement, text)
     text = text.replace("__KEEP", "")
     # SwiftUI re-exports AppKit on macOS, so files may rely on it implicitly.
-    return "import AppKit\n" + text
+    return "import AppKitShim\n" + text
 
 
 def write_if_changed(path: pathlib.Path, text: str) -> None:
@@ -218,7 +243,7 @@ def main() -> None:
             relative = source.relative_to(MAC)
             override = OVERRIDES / relative
             expected.add(relative)
-            text = override.read_text() if override.exists() else transform(source.read_text(), source.name)
+            text = override.read_text().replace("import AppKit\n", "import AppKitShim\n") if override.exists() else transform(source.read_text(), source.name)
             write_if_changed(OUT / relative, text)
     for stale in OUT.rglob("*.swift"):
         if stale.relative_to(OUT) not in expected:

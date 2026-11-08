@@ -287,6 +287,24 @@ enum ViewBridge {
     nonisolated(unsafe) private static var hoverKey: UInt8 = 0
     nonisolated(unsafe) private static var scrollKey: UInt8 = 0
     nonisolated(unsafe) private static var pressKey: UInt8 = 0
+    private typealias ResponderIMP = @convention(c) (UIResponder, Selector, NSSet, UIEvent?) -> Void
+    private static var responderIMPs: [Selector: ResponderIMP] = [:]
+    private static let forwardedSelectors: Set<Selector> = [
+        #selector(UIResponder.touchesBegan(_:with:)),
+        #selector(UIResponder.touchesMoved(_:with:)),
+        #selector(UIResponder.touchesEnded(_:with:)),
+        #selector(UIResponder.touchesCancelled(_:with:)),
+        #selector(UIResponder.pressesBegan(_:with:)),
+        #selector(UIResponder.pressesEnded(_:with:))
+    ]
+
+    /// Calls UIKit's implementation under its real selector. UIKit forwards up the
+    /// responder chain using the selector it was invoked with, so the swizzled name
+    /// would reach responders that do not implement it.
+    static func forward(_ responder: UIResponder, _ selector: Selector, _ items: NSSet, _ event: UIEvent?) {
+        responderIMPs[selector]?(responder, selector, items, event)
+    }
+
     private static var originalHitTest: (@convention(c) (UIView, Selector, CGPoint, UIEvent?) -> UIView?)?
 
     static func tracking(of view: UIView) -> [NSTrackingArea] {
@@ -396,6 +414,9 @@ enum ViewBridge {
         ]
         for (cls, original, replacement) in pairs {
             guard let a = class_getInstanceMethod(cls, original), let b = class_getInstanceMethod(cls, replacement) else { continue }
+            if forwardedSelectors.contains(original) {
+                responderIMPs[original] = unsafeBitCast(method_getImplementation(a), to: ResponderIMP.self)
+            }
             if class_addMethod(cls, original, method_getImplementation(b), method_getTypeEncoding(b)) {
                 class_replaceMethod(cls, replacement, method_getImplementation(a), method_getTypeEncoding(a))
             } else {
@@ -484,7 +505,7 @@ extension UIView {
             mouseDown(with: mouse)
             return
         }
-        ak_swizzled_touchesBegan(touches, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.touchesBegan(_:with:)), touches as NSSet, event)
     }
 
     @objc func ak_swizzled_touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -492,7 +513,7 @@ extension UIView {
             mouseDragged(with: mouse)
             return
         }
-        ak_swizzled_touchesMoved(touches, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.touchesMoved(_:with:)), touches as NSSet, event)
     }
 
     @objc func ak_swizzled_touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -500,7 +521,7 @@ extension UIView {
             mouseUp(with: mouse)
             return
         }
-        ak_swizzled_touchesEnded(touches, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.touchesEnded(_:with:)), touches as NSSet, event)
     }
 
     @objc func ak_swizzled_touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -508,7 +529,7 @@ extension UIView {
             mouseUp(with: mouse)
             return
         }
-        ak_swizzled_touchesCancelled(touches, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.touchesCancelled(_:with:)), touches as NSSet, event)
     }
 }
 
@@ -525,7 +546,7 @@ extension UIResponder {
             keyDown(with: key)
             return
         }
-        ak_swizzled_pressesBegan(presses, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.pressesBegan(_:with:)), presses as NSSet, event)
     }
 
     @objc func ak_swizzled_pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -535,7 +556,7 @@ extension UIResponder {
             keyUp(with: key)
             return
         }
-        ak_swizzled_pressesEnded(presses, with: event)
+        ViewBridge.forward(self, #selector(UIResponder.pressesEnded(_:with:)), presses as NSSet, event)
     }
 }
 
@@ -657,5 +678,61 @@ final class PointerRouter: NSObject {
             phase: phase
         )
         if NSEvent.dispatch(event) != nil { view.scrollWheel(with: event) }
+    }
+}
+
+/// Draws a very tall canvas through a surface a few screens high that follows the
+/// scroll position. AppKit tiles large layer-backed views; a UIKit layer beyond the
+/// GPU texture limit renders nothing.
+public final class NSViewportBackingView: UIView {
+    public var drawContent: ((CGRect) -> Void)?
+    private weak var owner: UIView?
+    private var scrollObserver: (any NSObjectProtocol)?
+
+    override public init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        backgroundColor = .clear
+        contentMode = .redraw
+        isUserInteractionEnabled = false
+    }
+
+    public required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    public func attach(to owner: UIView) {
+        self.owner = owner
+        if superview !== owner { owner.insertSubview(self, at: 0) }
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        scrollObserver = owner.enclosingScrollView.map { scrollView in
+            NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scrollView, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reposition() }
+            }
+        }
+        reposition()
+    }
+
+    public func reposition() {
+        guard let owner else { return }
+        let visible = owner.enclosingScrollView.map { owner.convert($0.bounds, from: $0) } ?? owner.bounds
+        let needed = visible.insetBy(dx: 0, dy: -96).intersection(owner.bounds)
+        let widthMatches = abs(frame.width - owner.bounds.width) < 0.5
+        guard !needed.isNull, !(widthMatches && frame.contains(needed)) else { return }
+        frame = visible.insetBy(dx: 0, dy: -visible.height).intersection(owner.bounds)
+        setNeedsDisplay()
+    }
+
+    public func invalidate(_ rect: CGRect?) {
+        guard let rect else { return setNeedsDisplay() }
+        setNeedsDisplay(rect.offsetBy(dx: -frame.minX, dy: -frame.minY))
+    }
+
+    override public func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        context.saveGState()
+        context.translateBy(x: -frame.minX, y: -frame.minY)
+        drawContent?(rect.offsetBy(dx: frame.minX, dy: frame.minY))
+        context.restoreGState()
     }
 }

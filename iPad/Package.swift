@@ -2,8 +2,9 @@
 import PackageDescription
 
 // iPadOS build of the SakuraCord app, packaged with xtool
-// (`xtool dev build --ipa`). Sources/SakuraCord is a symlink to the macOS app's
-// sources; Sources/AppKit implements the AppKit surface they use on top of UIKit.
+// (`xtool dev build --ipa`). Sources/SakuraCord/Generated is produced from the macOS app.s
+// sources; Sources/AppKit implements the AppKit surface they use on top of UIKit, as
+// a module named AppKitShim so that dependencies' `canImport(AppKit)` stays false.
 let package = Package(
     name: "SakuraCordPad",
     platforms: [.iOS(.v27)],
@@ -23,13 +24,14 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "AppKit",
+            name: "AppKitShim",
+            path: "Sources/AppKit",
             swiftSettings: [.enableUpcomingFeature("StrictConcurrency"), .defaultIsolation(MainActor.self)]
         ),
         .target(
             name: "SakuraCordPad",
             dependencies: [
-                "AppKit", "SakuraCordModels", "DiscordProtocol", "SakuraCordPersistence",
+                "AppKitShim", "SakuraCordModels", "DiscordProtocol", "SakuraCordPersistence",
                 "MessageRendering", "MediaPipeline", "SakuraCordPluginSDK",
                 .product(name: "Lottie", package: "lottie-ios"),
                 .product(name: "HCaptcha", package: "hcaptcha")
