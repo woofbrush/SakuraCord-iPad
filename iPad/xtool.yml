@@ -3,3 +3,6 @@ bundleID: dev.sakuracord.SakuraCordPad
 product: SakuraCordPad
 infoPath: Info.plist
 iconPath: Resources/AppIcon.png
+extensions:
+  - product: SakuraCordBroadcast
+    infoPath: Broadcast-Info.plist

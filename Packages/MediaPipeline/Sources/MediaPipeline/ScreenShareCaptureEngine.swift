@@ -119,6 +119,7 @@ public enum ScreenShareCaptureError: LocalizedError, Equatable, Sendable {
     case unavailable
     case outputUnavailable
     case encoderUnavailable(String)
+    case broadcastExtensionMissing
 
     public var errorDescription: String? {
         switch self {
@@ -128,34 +129,13 @@ public enum ScreenShareCaptureError: LocalizedError, Equatable, Sendable {
             "SakuraCord could not attach to the selected screen source."
         case .encoderUnavailable(let message):
             "The screen-share encoder could not start: \(message)"
+        case .broadcastExtensionMissing:
+            "The screen broadcast extension is not installed. Reinstall SakuraCord without removing app extensions."
         }
     }
 }
 
-#if os(iOS)
-/// ScreenCaptureKit's picker and stream configuration do not exist on iPadOS.
-public final class ScreenShareCaptureEngine: NSObject, @unchecked Sendable {
-    public nonisolated let events = AsyncStream<ScreenShareCaptureEvent> { _ in }
-    public nonisolated let previewFrames = AsyncStream<VoiceVideoFrame> { _ in }
-    nonisolated let encodedFrames = AsyncStream<ScreenShareEncodedVideoFrame> { _ in }
-    public nonisolated let encodedAudioFrames = AsyncStream<CapturedOpusFrame> { _ in }
-    public var currentVideoFormat: ScreenShareVideoFormat? { nil }
-    public var includesAudio: Bool { false }
-
-    public init(settings _: ScreenShareSettings = .init()) {}
-    public func preparePreview() async throws { throw ScreenShareCaptureError.unavailable }
-    public func presentSourcePicker() async {}
-    public func updateSettings(_: ScreenShareSettings) async throws {}
-    public func beginEncoding() async throws -> ScreenShareVideoFormat { throw ScreenShareCaptureError.unavailable }
-    public func endEncoding() async {}
-    public func setPreviewEnabled(_: Bool) {}
-    public func setNetworkDemand(_: Bool) throws {}
-    public func stop() async {}
-    func requestKeyframe() {}
-    func didFinishSendingVideoFrame(generation _: UInt64) {}
-    func isCurrentVideoFrame(generation _: UInt64) -> Bool { false }
-}
-#else
+#if !os(iOS)
 /// Owns one system-selected ScreenCaptureKit stream. Capture starts only after
 /// the user selects a source; H.264 encoding is attached only after the user
 /// confirms sharing so an idle preview does not pay encoder or network costs.

@@ -8,7 +8,10 @@ import PackageDescription
 let package = Package(
     name: "SakuraCordPad",
     platforms: [.iOS(.v27)],
-    products: [.library(name: "SakuraCordPad", targets: ["SakuraCordPad"])],
+    products: [
+        .library(name: "SakuraCordPad", targets: ["SakuraCordPad"]),
+        .library(name: "SakuraCordBroadcast", targets: ["SakuraCordBroadcast"])
+    ],
     dependencies: [
         .package(path: "../Packages/SakuraCordModels"),
         .package(path: "../Packages/DiscordProtocol"),
@@ -43,6 +46,14 @@ let package = Package(
                 .defaultIsolation(MainActor.self),
                 .interoperabilityMode(.Cxx)
             ]
+        ),
+        .target(
+            name: "SakuraCordBroadcast",
+            dependencies: ["MediaPipeline"],
+            path: "Sources/SakuraCordBroadcast",
+            swiftSettings: [.interoperabilityMode(.Cxx)],
+            // iPadOS instantiates SampleHandler by name, so no symbol pulls it from the archive.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-ObjC"])]
         )
     ]
 )

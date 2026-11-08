@@ -13,7 +13,7 @@ let kAudioDeviceTransportTypeVirtual: UInt32 = 0x7669_7274 // 'virt'
 let kAudioDeviceTransportTypeAggregate: UInt32 = 0x6772_7570 // 'grup'
 
 /// iPadOS has no screen-recording permission for in-app capture of other apps.
-func CGPreflightScreenCaptureAccess() -> Bool { false }
+func CGPreflightScreenCaptureAccess() -> Bool { true }
 
 public enum MediaDeviceCatalog {
     public static func snapshot() -> MediaDeviceSnapshot {

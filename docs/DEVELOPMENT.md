@@ -197,6 +197,13 @@ iPad/build.sh               # writes iPad/xtool/SakuraCordPad.ipa
 `App/Sources/SakuraCord`, applying its syntax rewrites; run by `build.sh`.
 `iPad/Sources/AppKit` implements the AppKit API the app uses on top of UIKit,
 including the event routing behind `mouseDown`, `keyDown` and tracking areas.
+
+Screen sharing on iPadOS runs in `iPad/Sources/SakuraCordBroadcast`, a Broadcast
+Upload extension, because only an extension can capture the whole screen and a
+backgrounded app cannot use the hardware encoder. It encodes H.264 and Opus itself
+and sends finished frames to the app over a loopback socket
+(`MediaPipeline/ScreenShareBroadcast.swift`). Install the IPA with its extension
+kept; removing app extensions disables Share Screen.
 A file in `iPad/Overrides/` replaces the macOS file of the same path where the
 platforms genuinely differ, such as the app entry point. New AppKit use in
 `App/` may need a matching addition to `iPad/Sources/AppKit`.
