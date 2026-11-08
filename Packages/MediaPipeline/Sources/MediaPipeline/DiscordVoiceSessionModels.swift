@@ -1,4 +1,6 @@
+#if os(macOS)
 import CoreAudio
+#endif
 import Foundation
 import OSLog
 import SakuraCordModels

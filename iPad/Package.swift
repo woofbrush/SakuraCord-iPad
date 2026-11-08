@@ -1,9 +1,9 @@
 // swift-tools-version: 6.4
 import PackageDescription
 
-// iPadOS app built with xtool (`xtool dev build --ipa`). It shares the
-// platform-neutral packages with the macOS app; AppKit presentation, voice,
-// plugins and Sparkle updates stay in App/.
+// iPadOS build of the SakuraCord app, packaged with xtool
+// (`xtool dev build --ipa`). Sources/SakuraCord is a symlink to the macOS app's
+// sources; Sources/AppKit implements the AppKit surface they use on top of UIKit.
 let package = Package(
     name: "SakuraCordPad",
     platforms: [.iOS(.v27)],
@@ -11,24 +11,35 @@ let package = Package(
     dependencies: [
         .package(path: "../Packages/SakuraCordModels"),
         .package(path: "../Packages/DiscordProtocol"),
+        .package(path: "../Packages/SakuraCordPersistence"),
         .package(path: "../Packages/MessageRendering"),
+        .package(path: "../Packages/MediaPipeline"),
+        .package(path: "../Packages/SakuraCordPluginSDK"),
+        .package(url: "https://github.com/airbnb/lottie-ios.git", exact: "4.6.1"),
         .package(
             url: "https://github.com/llsc12/hcaptcha",
             revision: "29de12bd290c5cc9c61b3e3c15fe9a9d21449465"
         )
     ],
     targets: [
-        // Shared/ holds symlinks to the macOS app's platform-neutral sign-in
-        // services so both apps run the same authentication code.
+        .target(
+            name: "AppKit",
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency"), .defaultIsolation(MainActor.self)]
+        ),
         .target(
             name: "SakuraCordPad",
             dependencies: [
-                "SakuraCordModels", "DiscordProtocol", "MessageRendering",
+                "AppKit", "SakuraCordModels", "DiscordProtocol", "SakuraCordPersistence",
+                "MessageRendering", "MediaPipeline", "SakuraCordPluginSDK",
+                .product(name: "Lottie", package: "lottie-ios"),
                 .product(name: "HCaptcha", package: "hcaptcha")
             ],
+            path: "Sources/SakuraCord",
+            resources: [.process("Resources")],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
-                .defaultIsolation(MainActor.self)
+                .defaultIsolation(MainActor.self),
+                .interoperabilityMode(.Cxx)
             ]
         )
     ]

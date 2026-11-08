@@ -1,4 +1,6 @@
+#if os(macOS)
 import CoreAudio
+#endif
 import DaveKit
 import Foundation
 @preconcurrency import Network

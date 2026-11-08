@@ -1,6 +1,8 @@
 import AVFAudio
 @preconcurrency import AVFoundation
+#if os(macOS)
 import CoreAudio
+#endif
 import Foundation
 import OSLog
 

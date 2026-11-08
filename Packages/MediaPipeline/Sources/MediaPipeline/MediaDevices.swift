@@ -1,6 +1,8 @@
 import AudioToolbox
 import AVFoundation
+#if os(macOS)
 import CoreAudio
+#endif
 import Foundation
 
 public struct AudioDeviceInfo: Identifiable, Equatable, Sendable {
@@ -77,6 +79,7 @@ public struct MediaDeviceSnapshot: Equatable, Sendable {
     )
 }
 
+#if os(macOS)
 public enum MediaDeviceCatalog {
     public static func snapshot() -> MediaDeviceSnapshot {
         let system = AudioHardwareSystem.shared
@@ -337,6 +340,8 @@ public final class MediaDeviceMonitor: @unchecked Sendable {
         handler(MediaDeviceCatalog.snapshot())
     }
 }
+
+#endif
 
 public enum MediaDeviceError: Error, Equatable {
     case audioUnitUnavailable

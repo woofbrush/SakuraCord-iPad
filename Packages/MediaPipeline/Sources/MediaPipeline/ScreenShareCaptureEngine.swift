@@ -1,5 +1,7 @@
 @preconcurrency import CoreImage
+#if os(macOS)
 @preconcurrency import ScreenCaptureKit
+#endif
 import CoreMedia
 import Foundation
 import OSLog
@@ -9,6 +11,7 @@ private let screenCaptureLogger = Logger(
     category: "ScreenShareCapture"
 )
 
+#if os(macOS)
 private struct ScreenShareSettingsUpdateContext {
     var previousSettings: ScreenShareSettings
     var filter: SCContentFilter
@@ -21,6 +24,7 @@ private struct ScreenShareEncodingContext {
     var format: ScreenShareVideoFormat
     var includesAudio: Bool
 }
+#endif
 
 private struct ScreenShareDemandTransition {
     var shouldStartEncoder: Bool
@@ -128,6 +132,30 @@ public enum ScreenShareCaptureError: LocalizedError, Equatable, Sendable {
     }
 }
 
+#if os(iOS)
+/// ScreenCaptureKit's picker and stream configuration do not exist on iPadOS.
+public final class ScreenShareCaptureEngine: NSObject, @unchecked Sendable {
+    public nonisolated let events = AsyncStream<ScreenShareCaptureEvent> { _ in }
+    public nonisolated let previewFrames = AsyncStream<VoiceVideoFrame> { _ in }
+    nonisolated let encodedFrames = AsyncStream<ScreenShareEncodedVideoFrame> { _ in }
+    public nonisolated let encodedAudioFrames = AsyncStream<CapturedOpusFrame> { _ in }
+    public var currentVideoFormat: ScreenShareVideoFormat? { nil }
+    public var includesAudio: Bool { false }
+
+    public init(settings _: ScreenShareSettings = .init()) {}
+    public func preparePreview() async throws { throw ScreenShareCaptureError.unavailable }
+    public func presentSourcePicker() async {}
+    public func updateSettings(_: ScreenShareSettings) async throws {}
+    public func beginEncoding() async throws -> ScreenShareVideoFormat { throw ScreenShareCaptureError.unavailable }
+    public func endEncoding() async {}
+    public func setPreviewEnabled(_: Bool) {}
+    public func setNetworkDemand(_: Bool) throws {}
+    public func stop() async {}
+    func requestKeyframe() {}
+    func didFinishSendingVideoFrame(generation _: UInt64) {}
+    func isCurrentVideoFrame(generation _: UInt64) -> Bool { false }
+}
+#else
 /// Owns one system-selected ScreenCaptureKit stream. Capture starts only after
 /// the user selects a source; H.264 encoding is attached only after the user
 /// confirms sharing so an idle preview does not pay encoder or network costs.
@@ -794,3 +822,4 @@ extension ScreenShareCaptureEngine: SCContentSharingPickerObserver {
         return "Couldn’t start the preview. Try again."
     }
 }
+#endif
