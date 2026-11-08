@@ -3,8 +3,28 @@ import UserNotifications
 public final class NSApplication: NSObject {
     public static let shared: NSApplication = {
         ViewBridge.install()
-        return NSApplication()
+        let application = NSApplication()
+        application.observeSceneVisibility()
+        return application
     }()
+
+    /// AppKit reports window occlusion changes; on iPadOS the scene lifecycle is the equivalent.
+    private func observeSceneVisibility() {
+        let names = [
+            UIScene.didActivateNotification, UIScene.willDeactivateNotification,
+            UIScene.didEnterBackgroundNotification, UIScene.willEnterForegroundNotification
+        ]
+        for name in names {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { note in
+                MainActor.assumeIsolated {
+                    guard let scene = note.object as? UIWindowScene else { return }
+                    for window in scene.windows {
+                        NotificationCenter.default.post(name: UIWindow.didChangeOcclusionStateNotification, object: window)
+                    }
+                }
+            }
+        }
+    }
 
     public enum ActivationPolicy: Sendable { case regular, accessory, prohibited }
     public enum TerminateReply: Sendable { case terminateNow, terminateCancel, terminateLater }
@@ -86,7 +106,11 @@ public extension UIWindow {
     var isMiniaturized: Bool { false }
     var windowNumber: Int { hash }
     var contentLayoutRect: CGRect { bounds.inset(by: safeAreaInsets) }
-    var occlusionState: NSWindow.OcclusionState { windowScene?.activationState == .foregroundActive ? .visible : [] }
+    /// Visible means on screen, whether or not the scene has keyboard focus, as on macOS.
+    var occlusionState: NSWindow.OcclusionState {
+        guard let state = windowScene?.activationState else { return [] }
+        return state == .foregroundActive || state == .foregroundInactive ? .visible : []
+    }
     var styleMask: NSWindow.StyleMask { [] }
 
     var firstResponder: UIResponder? {

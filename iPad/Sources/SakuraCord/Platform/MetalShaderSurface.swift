@@ -1,6 +1,7 @@
 import AppKitShim
 import Metal
 import MetalKit
+import OSLog
 
 /// Draws the app's SwiftUI color-effect shaders. SwiftUI needs them precompiled
 /// into a metallib, and this project is built without the Metal compiler, so the
@@ -43,13 +44,18 @@ struct MetalShaderSurface: UIViewRepresentable {
             colorPixelFormat = .bgra8Unorm
             isUserInteractionEnabled = false
             guard let device else { return }
-            let library = try? device.makeLibrary(source: Self.source(for: function), options: nil)
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = library?.makeFunction(name: "surfaceVertex")
-            descriptor.fragmentFunction = library?.makeFunction(name: "surfaceFragment")
-            descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
-            pipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
-            queue = device.makeCommandQueue()
+            do {
+                let library = try device.makeLibrary(source: Self.source(for: function), options: nil)
+                let descriptor = MTLRenderPipelineDescriptor()
+                descriptor.vertexFunction = library.makeFunction(name: "surfaceVertex")
+                descriptor.fragmentFunction = library.makeFunction(name: "surfaceFragment")
+                descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+                pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+                queue = device.makeCommandQueue()
+            } catch {
+                Logger(subsystem: "dev.sakuracord.SakuraCord", category: "Shaders")
+                    .error("Could not build \(function, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         required init(coder _: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -58,7 +64,9 @@ struct MetalShaderSurface: UIViewRepresentable {
             let call = function == "sakuraSignInLight"
                 ? "sakuraSignInLight(position, base, bounds, u.time, half4(u.first), half4(u.middle), half4(u.last), u.scalar)"
                 : "sakuraAuthenticationLoading(position, base, bounds, u.time, half4(u.first), half4(u.last), u.scalar)"
-            return SakuraMetalSources.signInLight + """
+            // Stitchable functions are for SwiftUI's linker; here they are called directly.
+            let shaders = SakuraMetalSources.signInLight.replacingOccurrences(of: "[[ stitchable ]]", with: "static")
+            return shaders + """
 
             struct SurfaceUniforms { float2 size; float time; float scalar; float4 base; float4 first; float4 middle; float4 last; };
             struct SurfaceVarying { float4 position [[position]]; float2 uv; };
@@ -78,6 +86,7 @@ struct MetalShaderSurface: UIViewRepresentable {
         }
 
         func update(elapsed: TimeInterval, colors: [Color], scalar: Double, base: Color) {
+            backgroundColor = UIColor(base)
             uniforms.size = SIMD2(Float(bounds.width), Float(bounds.height))
             uniforms.time = Float(elapsed)
             uniforms.scalar = Float(scalar)
