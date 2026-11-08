@@ -21,6 +21,8 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
     public var usesPredominantAxisScrolling = true
     public var automaticallyAdjustsContentInsets = false
     public var scrollerInsets = UIEdgeInsets.zero
+    /// macOS insets scroll views under the titlebar by itself.
+    open var ak_insetsBelowToolbar: Bool { false }
     public var contentInsets: UIEdgeInsets {
         get { contentInset }
         set { contentInset = newValue }
@@ -60,8 +62,18 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
 
     override open func layoutSubviews() {
         super.layoutSubviews()
+        if ak_insetsBelowToolbar { insetBelowToolbar() }
         tile()
         syncContentSize()
+    }
+
+    private func insetBelowToolbar() {
+        guard window != nil else { return }
+        let top = max(0, UIWindow.ak_toolbarBottomY - convert(bounds, to: nil).minY)
+        guard abs(contentInset.top - top) > 0.5 else { return }
+        let restsAtTop = contentOffset.y <= -contentInset.top + 0.5
+        contentInset.top = top
+        if restsAtTop { contentOffset.y = -top }
     }
 
     func documentFrameDidChange(_ view: UIView) {

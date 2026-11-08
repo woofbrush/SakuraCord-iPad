@@ -69,6 +69,7 @@ public final class VoiceAudioEngine {
     private let captureSession = AVCaptureSession()
     private let captureQueue = DispatchQueue(label: "app.sakuracord.audio.capture", qos: .userInteractive)
     private var captureOutput: AVCaptureAudioDataOutput?
+    private var isVoiceCaptureInstalled = false
     private final class CaptureInputs: @unchecked Sendable {
         // Written on captureQueue, read only after the awaited hop returns.
         var inputs: [AVCaptureInput] = []
@@ -184,11 +185,17 @@ public final class VoiceAudioEngine {
         }
         do {
             // Local tests can warm up capture while Core Audio starts the output route.
-            if captureBeforePlayback {
+            // Voice processing can only be switched on before the engine starts.
+            #if os(iOS)
+            let capturesFirst = true
+            #else
+            let capturesFirst = captureBeforePlayback
+            #endif
+            if capturesFirst {
                 try startCaptureGraph(deviceID: inputDeviceID)
             }
             try startPlaybackGraph()
-            if !captureBeforePlayback {
+            if !capturesFirst {
                 try startCaptureGraph(deviceID: inputDeviceID)
             }
             isRunning = true
@@ -221,8 +228,16 @@ public final class VoiceAudioEngine {
         captureRecoveryTask = nil
         playbackRecoveryTask?.cancel()
         playbackRecoveryTask = nil
+        let hadVoiceCapture = isVoiceCaptureInstalled
         tearDownCaptureGraph()
         tearDownPlaybackGraph()
+        #if os(iOS)
+        if hadVoiceCapture {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+        #else
+        _ = hadVoiceCapture
+        #endif
         captureEncoder.removeAllInjectedAudio()
         captureEncoder.handler = nil
     }
@@ -230,6 +245,34 @@ public final class VoiceAudioEngine {
     // Configuration and startRunning run asynchronously on the serial capture
     // queue so the main actor never blocks on Core Audio; queue order keeps them
     // behind any earlier teardown. A rejected input surfaces through recovery.
+    #if os(iOS)
+    /// The capture session's microphone has no echo cancellation, so on the speaker
+    /// a call hears itself. The engine's voice-processing input removes what it plays.
+    private func startCaptureGraph(deviceID: AudioDeviceID?) throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        try session.setActive(true)
+        if let deviceID { try? MediaDeviceCatalog.selectInput(deviceID, on: playbackEngine) }
+        let input = playbackEngine.inputNode
+        if !input.isVoiceProcessingEnabled { try input.setVoiceProcessingEnabled(true) }
+        try installVoiceCaptureTap()
+        inputDeviceID = deviceID
+    }
+
+    /// Also run after a route change, when the input's format may have changed.
+    private func installVoiceCaptureTap() throws {
+        let input = playbackEngine.inputNode
+        input.removeTap(onBus: 0)
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { throw VoiceAudioEngineError.inputUnavailable }
+        input.installTap(onBus: 0, bufferSize: 960, format: format, block: Self.voiceCaptureTap(captureEncoder))
+        isVoiceCaptureInstalled = true
+    }
+
+    private nonisolated static func voiceCaptureTap(_ encoder: OpusSampleBufferEncoder) -> AVAudioNodeTapBlock {
+        { buffer, _ in encoder.process(buffer) }
+    }
+    #else
     private func startCaptureGraph(deviceID: AudioDeviceID?) throws {
         let (input, resolvedDeviceID) = try makeCaptureInput(
             deviceID: deviceID,
@@ -270,6 +313,7 @@ public final class VoiceAudioEngine {
         }
         voiceAudioLogger.info("Voice capture configured without opening a shared output route")
     }
+    #endif
 
     private func onCaptureQueue(_ work: @escaping @Sendable () throws -> Void) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -406,6 +450,9 @@ public final class VoiceAudioEngine {
             reselectCurrentDevice: reselectCurrentDevice
         )
         playbackEngine.mainMixerNode.outputVolume = isDeafened ? 0 : min(max(outputVolume, 0), 2)
+        #if os(iOS)
+        if isVoiceCaptureInstalled { try installVoiceCaptureTap() }
+        #endif
         playbackEngine.prepare()
         try playbackEngine.start()
         let format = playbackEngine.mainMixerNode.outputFormat(forBus: 0)
@@ -513,6 +560,10 @@ public final class VoiceAudioEngine {
     }
 
     private func tearDownCaptureGraph() {
+        if isVoiceCaptureInstalled {
+            playbackEngine.inputNode.removeTap(onBus: 0)
+            isVoiceCaptureInstalled = false
+        }
         captureOutput?.setSampleBufferDelegate(nil, queue: nil)
         captureOutput = nil
         // Asynchronous so stopRunning never blocks the main actor; later capture
@@ -555,6 +606,11 @@ public final class VoiceAudioEngine {
             inputDeviceID = deviceID
             return
         }
+        #if os(iOS)
+        if let deviceID { try MediaDeviceCatalog.selectInput(deviceID, on: playbackEngine) }
+        inputDeviceID = deviceID
+        return
+        #else
         inputRouteGeneration &+= 1
         let generation = inputRouteGeneration
         captureRecoveryTask?.cancel()
@@ -607,6 +663,7 @@ public final class VoiceAudioEngine {
             try? await stabilizeCaptureSession(generation: generation)
             throw error
         }
+        #endif
     }
 
     public func selectOutputDevice(_ deviceID: AudioDeviceID?) async throws {

@@ -500,14 +500,18 @@ open class NSPopover: NSObject {
     }
 
     private func handleClick(_ event: NSEvent) {
-        guard isShown else { return }
-        // A popover opened from this one is its child: clicking it is not "outside".
-        let index = Self.open.firstIndex { $0 === self } ?? 0
-        for popover in Self.open[index...] {
-            guard let surface = popover.container else { continue }
-            if surface.bounds.contains(surface.convert(event.locationInWindow, from: nil)) { return }
-        }
+        guard isShown, !ak_contains(event) else { return }
         DispatchQueue.main.async { [weak self] in self?.performClose(nil) }
+    }
+
+    /// Popovers share the window here, so an event's window can't say whether it landed
+    /// in one. A popover opened from this one is its child: clicking it is not "outside".
+    public func ak_contains(_ event: NSEvent) -> Bool {
+        let index = Self.open.firstIndex { $0 === self } ?? 0
+        return Self.open[index...].contains { popover in
+            guard let surface = popover.container else { return false }
+            return surface.bounds.contains(surface.convert(event.locationInWindow, from: nil))
+        }
     }
 
     open func close() {

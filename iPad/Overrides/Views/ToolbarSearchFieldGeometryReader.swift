@@ -33,6 +33,8 @@ final class PadToolbarSearch {
     static let shared = PadToolbarSearch()
 
     var isVisible = false
+    /// Fades as a thread pane moves over the field.
+    var alpha: CGFloat = 1
     var metrics = ToolbarSearchFieldMetrics.zero
     @ObservationIgnored var autocompleteFrame = CGRect.null
 }
@@ -57,6 +59,19 @@ struct ToolbarSearchFieldGeometryReader: View {
             .onChange(of: PadToolbarSearch.shared.metrics) { _, metrics in
                 changed(metrics)
             }
+    }
+}
+
+/// macOS gives hosted content a safe area under its titlebar; here the toolbar is
+/// part of the split view, which these separately hosted columns know nothing of.
+struct PadToolbarSafeArea<Content: View>: View {
+    let content: Content
+
+    var body: some View {
+        _ = PadToolbarSearch.shared.metrics
+        return content
+            .safeAreaPadding(.top, UIWindow.ak_toolbarBottomY)
+            .ignoresSafeArea(.container, edges: .top)
     }
 }
 
@@ -126,6 +141,8 @@ struct PadToolbarSearchField: View {
         .frame(width: ChatChromeMetrics.toolbarSearchMaximumFieldWidth, height: 38)
         .contentShape(.rect)
         .onTapGesture { isFocused = true }
+        .opacity(PadToolbarSearch.shared.alpha)
+        .allowsHitTesting(PadToolbarSearch.shared.alpha > 0.01)
         .background {
             PadSearchFieldAnchor(
                 isFocused: isFocused,

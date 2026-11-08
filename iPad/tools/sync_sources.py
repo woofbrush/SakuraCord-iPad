@@ -136,9 +136,11 @@ FILE_RULES = {
         (re.compile(r"[.]popover\(isPresented: [$]isPresented, arrowEdge: [.]bottom\)"), ".popover(isPresented: $isPresented)"),
     ],
     "NativeMemberListViewBridge.swift": [
+        (re.compile(r"(final class NativeMemberListScrollView: NSScrollView [{]\n)"), lambda m: m.group(1) + "    override var ak_insetsBelowToolbar: Bool { true }\n\n"),
         (re.compile(r"width: max\(0, contentSize[.]width\)"), "width: max(0, nsContentSize.width)"),
     ],
     "StableAnchoredPopover.swift": [
+        (re.compile(r"!self[.]isInsidePopover\(event[.]window, popover: popover\)"), "!popover.ak_contains(event)"),
         (re.compile(r"popover[.]contentViewController[?][.]view[.]window[?][.]ignoresMouseEvents =\s*configuration[.]ignoresMouseEvents"),
          "popover.contentViewController?.view.isUserInteractionEnabled = !configuration.ignoresMouseEvents"),
     ],
@@ -179,7 +181,7 @@ FILE_RULES = {
         (re.compile(r"[.]navigationSplitViewColumnWidth\(\s*min: ChatChromeMetrics[.]serverRailWidth"),
          lambda m: ".toolbar(removing: .sidebarToggle)\n            .toolbar { ToolbarItem(placement: .topBarTrailing) { padSidebarToggle } }\n            " + m.group(0)),
         (re.compile(r"[.]toolbar [{]\s*detailToolbar\s*[}]"),
-         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible ? .visible : .hidden)\n            }"),
+         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible && PadToolbarSearch.shared.alpha >= 0.5 ? .visible : .hidden)\n            }"),
         (re.compile(r"\n +[.]modifier\(MessageSearchToolbarModifier\(\s*model: model,\s*search: search,\s*prompt: prompt\s*\)\)"), ""),
         # Below the real toolbar row: on iPadOS that row is inside the split view, not above the root.
         (re.compile(r"[.]padding\([.]trailing, toolbarMetrics[.]trailingInset\)"),
@@ -346,6 +348,11 @@ FILE_RULES = {
     # macOS hangs these from the window's titlebar; iPadOS has none to reach, so the
     # same items sit over the window's top edge, on the toolbar's row.
     "WorkspaceTitlebar.swift": [
+        (re.compile(r"private func fadeSearch\(_ alpha: CGFloat\) [{].*?\n    [}]\n", re.S),
+         """private func fadeSearch(_ alpha: CGFloat) {
+        if PadToolbarSearch.shared.alpha != alpha { PadToolbarSearch.shared.alpha = alpha }
+    }
+"""),
         # UIHostingController's view is opaque by default; NSHostingController's is transparent.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
         (re.compile(r"guard let titlebar = window[?][.]standardWindowButton\([.]closeButton\)[?][.]superview else [{].*?titlebar[.]addSubview\(overlay\)\n", re.S),
@@ -389,6 +396,7 @@ FILE_RULES = {
     ],
     # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
     "WorkspaceColumnsHost.swift": [
+        (re.compile(r"return AnyView\(content[.]environment\(\\[.]self, environment\)\)"), r"return AnyView(PadToolbarSafeArea(content: content.environment(\\.self, environment)))"),
         # UIHostingController's view is opaque by default; NSHostingController's is transparent.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
         (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
@@ -401,13 +409,33 @@ FILE_RULES = {
     # A rail row's drag would otherwise claim every touch that moves, leaving none to scroll.
     "ServerRailDragging.swift": [
         (re.compile(r"DragGesture\(minimumDistance: 6, coordinateSpace: [.]global\)\s*[.]onChanged [{] drag[.]changed\(id, [$]0\) [}]\s*[.]onEnded [{] drag[.]ended\(id, [$]0\) [}]"),
-         """LongPressGesture(minimumDuration: 0.2)
-                    .sequenced(before: DragGesture(minimumDistance: 6, coordinateSpace: .global))
-                    .onChanged { if case .second(true, let value?) = $0 { drag.changed(id, value) } }
-                    .onEnded { if case .second(true, let value?) = $0 { drag.ended(id, value) } }"""),
+         "PadRailReorderGesture(changed: { drag.changed(id, $0) }, ended: { drag.ended(id, $0) })"),
+        (re.compile(r"[.]simultaneousGesture\(\s*PadRailReorderGesture"), ".gesture(\n                PadRailReorderGesture"),
+        (re.compile(r"_ value: DragGesture[.]Value"), "_ value: PadRailDragValue"),
     ],
     "ServerRailView.swift": [
         (re.compile(r"[.]onScrollPhaseChange [{] _, phase in\n\s+if drag[.]isScrolling"), lambda m: ".scrollDisabled(drag.draggedID != nil)\n        " + m.group(0)),
+    ],
+    # UIKit draws text for a top-left origin, which this bitmap context doesn't have.
+    "DiscordComponentControls.swift": [
+        (re.compile(r"(NSGraphicsContext[.]current = context\n)( *)(NSColor[.]clear[.]setFill\(\)\s*NSRect\(\s*x: 0,\s*y: 0,\s*width: (atlasW|w)idth,\s*height: (atlasHeight|height))"),
+         lambda m: f"{m.group(1)}{m.group(2)}context.cgContext.translateBy(x: 0, y: CGFloat({m.group(5)}))\n{m.group(2)}context.cgContext.scaleBy(x: 1, y: -1)\n{m.group(2)}{m.group(3)}"),
+    ],
+    # A text field's baseline sits apart from the symbol's on iPadOS.
+    "PollCreationView.swift": [
+        (re.compile(r'HStack\(alignment: [.]firstTextBaseline, spacing: InterfaceScale[.]metric\(11\)\) [{](\s*Image\(systemName: "chart[.]bar[.]xaxis"\))'),
+         lambda m: "HStack(alignment: .center, spacing: InterfaceScale.metric(11)) {" + m.group(1)),
+    ],
+    # A touch can come to rest at the loaded edge without a gesture starting there,
+    # which is the only intent macOS looks for, and newer pages then never load.
+    "NativeMessageTimelineCoordinatorScrolling.swift": [
+        (re.compile(r"(let hasIntent = switch direction [{]\s*case [.]earlier: hasEarlierHistoryScrollIntent\s*case [.]later: )hasLaterHistoryScrollIntent"),
+         lambda m: m.group(1) + "initialPositionConversation == parent.conversation"),
+    ],
+    # Being the key window is too narrow on iPadOS, where a visible app in Stage Manager
+    # need not hold key status, and a watched stream would never receive video.
+    "AppModelScreenSharing.swift": [
+        (re.compile(r"let isEnabled = mainWindowIsActive && intent[.]isEnabled"), "let isEnabled = intent.isEnabled"),
     ],
     "ComposerTextView.swift": [
         (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),
