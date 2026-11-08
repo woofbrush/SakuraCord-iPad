@@ -277,6 +277,7 @@ FILE_RULES = {
         (re.compile(r"override func pressureChange"), "func pressureChange"),
     ],
     "NativeTimelineCanvasView.swift": [
+        (re.compile(r"mediaViewerHost[.]translatesAutoresizingMaskIntoConstraints = false"), "mediaViewerHost.translatesAutoresizingMaskIntoConstraints = true"),
         (re.compile(r"\n *pressureConfiguration = NSPressureConfiguration\([^\n]*"), ""),
     ],
     # NSLayoutManager's storage is optional on both platforms, unlike UITextView's.
@@ -328,6 +329,8 @@ FILE_RULES = {
     # macOS hangs these from the window's titlebar; iPadOS has none to reach, so the
     # same items sit over the window's top edge, on the toolbar's row.
     "WorkspaceTitlebar.swift": [
+        # UIHostingController's view is opaque by default; NSHostingController's is transparent.
+        (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
         (re.compile(r"guard let titlebar = window[?][.]standardWindowButton\([.]closeButton\)[?][.]superview else [{].*?titlebar[.]addSubview\(overlay\)\n", re.S),
          "installOverlay()\n"),
         (re.compile(r"(        let overlay = WorkspaceTitlebarView\(\)\n)"),
@@ -369,6 +372,13 @@ FILE_RULES = {
     ],
     # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
     "WorkspaceColumnsHost.swift": [
+        # UIHostingController's view is opaque by default; NSHostingController's is transparent.
+        (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
+        (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
+    ],
+    "ConversationFooterHost.swift": [
+        # UIHostingController's view is opaque by default; NSHostingController's is transparent.
+        (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
         (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
     ],
     "ComposerTextView.swift": [
