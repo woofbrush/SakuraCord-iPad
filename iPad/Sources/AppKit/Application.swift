@@ -16,8 +16,9 @@ public final class NSApplication: NSObject {
         ]
         for name in names {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { note in
+                nonisolated(unsafe) let object = note.object
                 MainActor.assumeIsolated {
-                    guard let scene = note.object as? UIWindowScene else { return }
+                    guard let scene = object as? UIWindowScene else { return }
                     for window in scene.windows {
                         NotificationCenter.default.post(name: UIWindow.didChangeOcclusionStateNotification, object: window)
                     }
