@@ -510,7 +510,7 @@ extension UIView {
         let isSecondary = event?.buttonMask.contains(.secondary) == true
         if isSecondary, let mouse = mouseEvent(.rightMouseDown, touches, event) {
             if let menu = menu(for: mouse) {
-                menu.popUp(at: convert(mouse.locationInWindow, from: nil), in: self)
+                menu.popUpForContextClick(at: convert(mouse.locationInWindow, from: nil), in: self)
                 return
             }
             if routes(#selector(UIResponder.rightMouseDown(with:))) {
@@ -747,7 +747,7 @@ final class PointerRouter: NSObject {
         NSEvent.lastLocation = location
         let event = NSEvent(type: .rightMouseDown, location: location, window: view.window, clickCount: 1, buttonNumber: 1)
         NSEvent.current = event
-        view.menu(for: event)?.popUp(at: recognizer.location(in: view), in: view)
+        view.menu(for: event)?.popUpForContextClick(at: recognizer.location(in: view), in: view)
     }
 
     @objc func scroll(_ recognizer: UIPanGestureRecognizer) {

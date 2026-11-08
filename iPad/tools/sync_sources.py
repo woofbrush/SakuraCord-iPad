@@ -101,8 +101,10 @@ RULES = [
     (re.compile(r"[.]pickerStyle\([.]radioGroup\)"), ".pickerStyle(.segmented)"),
     (re.compile(r"\s*[.]horizontalRadioGroupLayout\(\)"), ""),
     (re.compile(r"\s*[.]collapsible\(false\)"), ""),
-    (re.compile(r'Image\("(discord|thread|github)", bundle: [.]module\)'), lambda m: f'Image("{m.group(1)}", bundle: .module).renderingMode(.template)'),
-    (re.compile(r'Image\("gif[.]square", bundle: [.]module\)'), 'Image("gif_square", bundle: .module).renderingMode(.template)'),
+    (re.compile(r'Image\("(discord|thread|github)", bundle: [.]module\)'), lambda m: f'SakuraCordSystemSymbol.bundledImage("{m.group(1)}")'),
+    (re.compile(r'Image\("gif[.]square", bundle: [.]module\)'), 'SakuraCordSystemSymbol.bundledImage("gif_square")'),
+    # Below the menu's button: these anchors are flipped here and not on macOS.
+    (re.compile(r"at: NSPoint\(x: 0, y: -4\), in: (\w+)\)"), lambda m: f"at: NSPoint(x: 0, y: {m.group(1)}.bounds.maxY + 4), in: {m.group(1)})"),
     (re.compile(r"NSFont\.preferredFont\("), "NSFont.macPreferredFont("),
 ]
 
@@ -395,6 +397,17 @@ FILE_RULES = {
         # UIHostingController's view is opaque by default; NSHostingController's is transparent.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
         (re.compile(r"translatesAutoresizingMaskIntoConstraints = false"), "translatesAutoresizingMaskIntoConstraints = true"),
+    ],
+    # A rail row's drag would otherwise claim every touch that moves, leaving none to scroll.
+    "ServerRailDragging.swift": [
+        (re.compile(r"DragGesture\(minimumDistance: 6, coordinateSpace: [.]global\)\s*[.]onChanged [{] drag[.]changed\(id, [$]0\) [}]\s*[.]onEnded [{] drag[.]ended\(id, [$]0\) [}]"),
+         """LongPressGesture(minimumDuration: 0.2)
+                    .sequenced(before: DragGesture(minimumDistance: 6, coordinateSpace: .global))
+                    .onChanged { if case .second(true, let value?) = $0 { drag.changed(id, value) } }
+                    .onEnded { if case .second(true, let value?) = $0 { drag.ended(id, value) } }"""),
+    ],
+    "ServerRailView.swift": [
+        (re.compile(r"[.]onScrollPhaseChange [{] _, phase in\n\s+if drag[.]isScrolling"), lambda m: ".scrollDisabled(drag.draggedID != nil)\n        " + m.group(0)),
     ],
     "ComposerTextView.swift": [
         (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),

@@ -16,6 +16,13 @@ enum SakuraCordSystemSymbol {
         return UIImage.perform(selector, with: name)?.takeUnretainedValue() as? UIImage
     }
 
+    /// SwiftUI's named lookup reads asset catalogs, and this build's images are loose files.
+    static func bundledImage(_ name: String) -> Image {
+        UIImage(named: name, in: .module, compatibleWith: nil)
+            .map { Image(uiImage: $0).renderingMode(.template) }
+            ?? Image(systemName: "questionmark.square.dashed")
+    }
+
     private static func symbolImage(_ name: String, fallback: String) -> Image {
         if UIImage(systemName: name) != nil { return Image(systemName: name) }
         return privateSymbol(name).map { Image(uiImage: $0).renderingMode(.template) } ?? Image(systemName: fallback)
@@ -32,7 +39,7 @@ enum SakuraCordSystemSymbol {
     @ViewBuilder
     static func swiftUIImage(named name: String) -> some View {
         if name == thread {
-            Image(name, bundle: .module).renderingMode(.template)
+            bundledImage(name)
                 .imageScale(.large)
         } else if let image = privateSymbol(name) {
             Image(uiImage: image).renderingMode(.template)

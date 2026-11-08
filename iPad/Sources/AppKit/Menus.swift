@@ -147,7 +147,13 @@ public final class NSMenu: NSObject {
     }
 
     public func popUp(at location: CGPoint, in view: UIView) {
-        MenuPresenter.present(self, at: location, in: view)
+        MenuPresenter.present(self, at: location, in: view, liftsContent: false)
+    }
+
+    /// A right click or long press, whose menu is about what it landed on. A button's
+    /// menu must not lift that: UIKit would attach the menu to the lifted content instead.
+    func popUpForContextClick(at location: CGPoint, in view: UIView) {
+        MenuPresenter.present(self, at: location, in: view, liftsContent: true)
     }
 
     @discardableResult
@@ -158,7 +164,7 @@ public final class NSMenu: NSObject {
     }
 
     public static func popUpContextMenu(_ menu: NSMenu, with event: NSEvent, for view: UIView) {
-        menu.popUp(at: view.convert(event.locationInWindow, from: nil), in: view)
+        menu.popUpForContextClick(at: view.convert(event.locationInWindow, from: nil), in: view)
     }
 }
 
@@ -169,12 +175,15 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
     private let menu: NSMenu
     private weak var view: UIView?
     private let location: CGPoint
+    private let liftsContent: Bool
     private var interaction: UIContextMenuInteraction?
+    private var isEnding = false
+    private var replacement: (() -> Void)?
 
     /// Left to itself, UIKit lifts the whole view the interaction is on.
     private lazy var targetedPreview: UITargetedPreview? = {
         guard let view else { return nil }
-        let preview = view.contextMenuPreview(at: location)
+        let preview = (liftsContent ? view.contextMenuPreview(at: location) : nil)
             ?? UIView(frame: CGRect(origin: location, size: CGSize(width: 1, height: 1)))
         let parameters = UIPreviewParameters()
         parameters.backgroundColor = .clear
@@ -185,14 +194,21 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
         )
     }()
 
-    private init(menu: NSMenu, view: UIView, location: CGPoint) {
+    private init(menu: NSMenu, view: UIView, location: CGPoint, liftsContent: Bool) {
         self.menu = menu
         self.view = view
         self.location = location
+        self.liftsContent = liftsContent
     }
 
-    static func present(_ menu: NSMenu, at location: CGPoint, in view: UIView) {
-        let presenter = MenuPresenter(menu: menu, view: view, location: location)
+    static func present(_ menu: NSMenu, at location: CGPoint, in view: UIView, liftsContent: Bool) {
+        // UIKit shows a menu presented during the last one's dismissal without its
+        // dimming, then takes it away when that dismissal finishes.
+        if let active, active.isEnding {
+            active.replacement = { present(menu, at: location, in: view, liftsContent: liftsContent) }
+            return
+        }
+        let presenter = MenuPresenter(menu: menu, view: view, location: location, liftsContent: liftsContent)
         active = presenter
         menu.delegate?.menuWillOpen?(menu)
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
@@ -251,11 +267,13 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
         willEndFor _: UIContextMenuConfiguration,
         animator: (any UIContextMenuInteractionAnimating)?
     ) {
+        isEnding = true
         let finish = { [self] in
             view?.removeInteraction(interaction)
             menu.delegate?.menuDidClose?(menu)
             NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: menu)
             if Self.active === self { Self.active = nil }
+            if let replacement { DispatchQueue.main.async(execute: replacement) }
         }
         if let animator { animator.addCompletion(finish) } else { finish() }
     }
