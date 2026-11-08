@@ -20,6 +20,11 @@ FOLDERS = ["App", "Models", "Services", "Support", "Views"]
 NON_OPTIONAL = r"layer|textStorage|layoutManager|textContainer"
 REMOVED_IMPORTS = re.compile(r"^(@preconcurrency )?import (Sparkle|ServiceManagement)\n", re.M)
 RULES = [
+    (re.compile(r"\bCTLineCreateWithAttributedString\("), "AKCTLineCreate("),
+    (re.compile(r"\bCTFramesetterCreateWithAttributedString\("), "AKCTFramesetterCreate("),
+    (re.compile(r"\bCTTypesetterCreateWithAttributedString\("), "AKCTTypesetterCreate("),
+    (re.compile(r"[.]applying\(\s*(?:NSImage[.]SymbolConfiguration|[.]init)\(\s*paletteColors:\s*"), ".ak_applying(NSImage.SymbolConfiguration.ak_palette("),
+    (re.compile(r"(?:NSImage[.]SymbolConfiguration|[.]init)\(\s*paletteColors:\s*"), "NSImage.SymbolConfiguration.ak_palette("),
     (re.compile(r"^(@preconcurrency )?import AppKit$", re.M), "import AppKitShim"),
     (re.compile(r"\bAppKit[.]"), "AppKitShim."),
     (re.compile(r"\[[.]withSecurityScope[^\]]*\]"), "[]"),
@@ -67,7 +72,6 @@ RULES = [
     (re.compile(r"[.]containerSize\b"), ".size"),
     (re.compile(r"for: [.]windowToolbar"), "for: .navigationBar"),
     (re.compile(r"[.]gesture\(WindowDragGesture\(\)\)"), ""),
-    (re.compile(r"[.]applying\([.]init\(paletteColors:"), ".applying(UIImage.SymbolConfiguration(paletteColors:"),
     (re.compile(r"let image = NSImage\(size: (NSSize\([^)]*\))\)\s*image[.]lockFocus\(\)"), lambda m: f"let image = NSImage(size: {m.group(1)}, flipped: true) {{ _ in"),
     (re.compile(r"image[.]unlockFocus\(\)"), "return true }"),
     (re.compile(r"image[.]size = (NSSize\([^)]*\))\s*return image"), lambda m: f"return image.ak_resized(to: {m.group(1)})"),

@@ -69,6 +69,7 @@ open class NSButton: UIView {
         super.init(frame: frame)
         control.frame = bounds
         control.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        control.tintColor = .label
         control.addTarget(self, action: #selector(ak_activate), for: .primaryActionTriggered)
         addSubview(control)
     }
@@ -157,6 +158,7 @@ open class NSImageView: UIImageView {
     override public init(frame: CGRect) {
         super.init(frame: frame)
         contentMode = .scaleAspectFit
+        tintColor = .label
     }
 
     public required init?(coder: NSCoder) { super.init(coder: coder) }

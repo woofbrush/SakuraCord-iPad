@@ -17,7 +17,7 @@ enum SakuraCordSystemSymbol {
     }
 
     private static func symbolImage(_ name: String, fallback: String) -> Image {
-        privateSymbol(name).map { Image(uiImage: $0) } ?? Image(systemName: fallback)
+        privateSymbol(name).map { Image(uiImage: $0).renderingMode(.template) } ?? Image(systemName: fallback)
     }
 
     static var emojiFaceGrinningImage: Image {
@@ -34,7 +34,7 @@ enum SakuraCordSystemSymbol {
             Image(name, bundle: .module).renderingMode(.template)
                 .imageScale(.large)
         } else if let image = privateSymbol(name) {
-            Image(uiImage: image)
+            Image(uiImage: image).renderingMode(.template)
         } else {
             Image(systemName: name)
         }

@@ -1,3 +1,4 @@
+import CoreText
 import ObjectiveC
 
 // MARK: Colors
@@ -43,7 +44,8 @@ public nonisolated extension UIColor {
         }
     }
 
-    func usingColorSpace(_: NSColorSpace) -> UIColor? { self }
+    /// AppKit's conversion resolves dynamic colors against the current appearance.
+    func usingColorSpace(_: NSColorSpace) -> UIColor? { resolvedColor(with: .ak_effective) }
 
     var redComponent: CGFloat { rgba.0 }
     var greenComponent: CGFloat { rgba.1 }
@@ -119,7 +121,7 @@ public nonisolated final class NSAppearance: NSObject {
     }
 
     public static var current: NSAppearance {
-        get { NSAppearance(style: UITraitCollection.current.userInterfaceStyle) }
+        get { NSAppearance(style: UITraitCollection.ak_effective.userInterfaceStyle) }
         set { UITraitCollection.current = UITraitCollection(userInterfaceStyle: newValue.style) }
     }
 
@@ -484,8 +486,10 @@ public nonisolated extension UIImage {
         self.init(cgImage: cgImage, scale: size.width > 0 ? CGFloat(cgImage.width) / size.width : 1, orientation: .up)
     }
 
+    /// Palette symbols must be original-rendered, or UIImage.draw paints them black.
     func withSymbolConfiguration(_ configuration: UIImage.SymbolConfiguration) -> UIImage? {
-        applyingSymbolConfiguration(configuration)
+        let image = applyingSymbolConfiguration(configuration)
+        return configuration.ak_isPalette ? image?.withRenderingMode(.alwaysOriginal) : image
     }
 
     var accessibilityDescription: String? {
@@ -654,4 +658,75 @@ nonisolated extension UIImage.SymbolWeight {
 /// CALayer contents take a CGImage on iOS, where AppKit also accepts an NSImage.
 public func nsLayerContents(_ value: Any?) -> Any? {
     (value as? UIImage).map { $0.cgImage as Any } ?? value
+}
+
+nonisolated(unsafe) private var paletteKey: UInt8 = 0
+
+public nonisolated extension UIImage.SymbolConfiguration {
+    fileprivate(set) var ak_isPalette: Bool {
+        get { objc_getAssociatedObject(self, &paletteKey) != nil }
+        set { objc_setAssociatedObject(self, &paletteKey, newValue ? true : nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    static func ak_palette(_ colors: [UIColor]) -> UIImage.SymbolConfiguration {
+        let configuration = UIImage.SymbolConfiguration(paletteColors: colors)
+        configuration.ak_isPalette = true
+        return configuration
+    }
+
+    func ak_applying(_ other: UIImage.SymbolConfiguration) -> UIImage.SymbolConfiguration {
+        let combined = applying(other)
+        combined.ak_isPalette = ak_isPalette || other.ak_isPalette
+        return combined
+    }
+}
+
+// MARK: CoreText colors
+
+public nonisolated enum AppearanceState {
+    nonisolated(unsafe) public static var style: UIUserInterfaceStyle = .unspecified
+}
+
+public nonisolated extension UITraitCollection {
+    /// The current traits, or the app's when none are set (background layout work).
+    static var ak_effective: UITraitCollection {
+        current.userInterfaceStyle == .unspecified && AppearanceState.style != .unspecified
+            ? UITraitCollection(userInterfaceStyle: AppearanceState.style)
+            : current
+    }
+}
+
+/// CoreText on iOS ignores UIKit's color attributes and draws such runs black;
+/// macOS honors them. Copies them to CoreText's own keys.
+nonisolated private func coreTextColored(_ source: CFAttributedString) -> CFAttributedString {
+    let string = source as NSAttributedString
+    let foreground = NSAttributedString.Key(kCTForegroundColorAttributeName as String)
+    let fromContext = NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
+    let underline = NSAttributedString.Key(kCTUnderlineColorAttributeName as String)
+    let whole = NSRange(location: 0, length: string.length)
+    var output: NSMutableAttributedString?
+    let traits = UITraitCollection.ak_effective
+    func copy(_ key: NSAttributedString.Key, to target: NSAttributedString.Key) {
+        string.enumerateAttributes(in: whole) { attributes, range, _ in
+            guard let color = attributes[key] as? UIColor, attributes[target] == nil, attributes[fromContext] == nil else { return }
+            let mutable = output ?? NSMutableAttributedString(attributedString: string)
+            output = mutable
+            mutable.addAttribute(target, value: color.resolvedColor(with: traits).cgColor, range: range)
+        }
+    }
+    copy(.foregroundColor, to: foreground)
+    copy(.underlineColor, to: underline)
+    return output ?? source
+}
+
+public nonisolated func AKCTLineCreate(_ string: CFAttributedString) -> CTLine {
+    CTLineCreateWithAttributedString(coreTextColored(string))
+}
+
+public nonisolated func AKCTFramesetterCreate(_ string: CFAttributedString) -> CTFramesetter {
+    CTFramesetterCreateWithAttributedString(coreTextColored(string))
+}
+
+public nonisolated func AKCTTypesetterCreate(_ string: CFAttributedString) -> CTTypesetter {
+    CTTypesetterCreateWithAttributedString(coreTextColored(string))
 }

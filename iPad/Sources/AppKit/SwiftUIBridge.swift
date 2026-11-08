@@ -51,7 +51,14 @@ public nonisolated struct NSHostingSizingOptions: OptionSet, Sendable {
 }
 
 public extension Image {
-    init(nsImage: UIImage) { self.init(uiImage: nsImage) }
+    /// AppKit template images follow the foreground style; `Image(uiImage:)` alone does not.
+    init(nsImage: UIImage) {
+        if nsImage.isSymbolImage, nsImage.renderingMode != .alwaysOriginal {
+            self = Image(uiImage: nsImage).renderingMode(.template)
+        } else {
+            self.init(uiImage: nsImage)
+        }
+    }
 }
 
 public extension View {

@@ -227,7 +227,7 @@ extension UIResponder {
     @objc(ak_rightMouseUp:) open func rightMouseUp(with event: NSEvent) {}
     @objc(ak_otherMouseDown:) open func otherMouseDown(with event: NSEvent) {}
     @objc(ak_scrollWheel:) open func scrollWheel(with event: NSEvent) {}
-    @objc(ak_keyDown:) open func keyDown(with event: NSEvent) {}
+    @objc(ak_keyDown:) open func keyDown(with event: NSEvent) { ViewBridge.continueKeyDown(from: self) }
     @objc(ak_keyUp:) open func keyUp(with event: NSEvent) {}
     @objc(ak_flagsChanged:) open func flagsChanged(with event: NSEvent) {}
     @objc(ak_cursorUpdate:) open func cursorUpdate(with event: NSEvent) {}
@@ -297,6 +297,15 @@ enum ViewBridge {
         #selector(UIResponder.pressesBegan(_:with:)),
         #selector(UIResponder.pressesEnded(_:with:))
     ]
+
+    static var pendingKeyPresses: (NSSet, UIEvent?)?
+
+    /// `super.keyDown` in AppKit passes the key to the next responder.
+    static func continueKeyDown(from responder: UIResponder) {
+        guard let (presses, event) = pendingKeyPresses else { return }
+        pendingKeyPresses = nil
+        forward(responder, #selector(UIResponder.pressesBegan(_:with:)), presses, event)
+    }
 
     /// Calls UIKit's implementation under its real selector. UIKit forwards up the
     /// responder chain using the selector it was invoked with, so the swizzled name
@@ -540,10 +549,15 @@ extension UIResponder {
     }
 
     @objc func ak_swizzled_pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if ViewBridge.overrides(self, #selector(UIResponder.keyDown(with:)), base: UIResponder.self),
+        // NSTextView routes its own keys; UITextView's handling reaches this base
+        // implementation, so routing it here again would recurse.
+        if !(self is NSTextView),
+           ViewBridge.overrides(self, #selector(UIResponder.keyDown(with:)), base: UIResponder.self),
            let press = presses.first,
            let key = NSEvent.key(press, type: .keyDown, window: (self as? UIView)?.window) {
+            ViewBridge.pendingKeyPresses = (presses as NSSet, event)
             keyDown(with: key)
+            ViewBridge.pendingKeyPresses = nil
             return
         }
         ViewBridge.forward(self, #selector(UIResponder.pressesBegan(_:with:)), presses as NSSet, event)
@@ -585,6 +599,11 @@ extension UIWindow {
     @objc func ak_swizzled_safeAreaInsetsDidChange() {
         ak_swizzled_safeAreaInsetsDidChange()
         UIWindow.ak_chromeTopInset = safeAreaInsets.top
+        if let style = NSApp.appearance?.style { overrideUserInterfaceStyle = style }
+        AppearanceState.style = traitCollection.userInterfaceStyle
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (window: UIWindow, _: UITraitCollection) in
+            AppearanceState.style = window.traitCollection.userInterfaceStyle
+        }
     }
 
     @objc func ak_swizzled_sendEvent(_ event: UIEvent) {
