@@ -163,6 +163,9 @@ public final class NSMenu: NSObject {
         return true
     }
 
+    /// Whether a menu is on screen and needs the keyboard itself.
+    public static var ak_isOpen: Bool { MenuPresenter.isMenuOpen }
+
     public static func popUpContextMenu(_ menu: NSMenu, with event: NSEvent, for view: UIView) {
         menu.popUpForContextClick(at: view.convert(event.locationInWindow, from: nil), in: view)
     }
@@ -172,6 +175,7 @@ public final class NSMenu: NSObject {
 @MainActor
 private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
     private static var active: MenuPresenter?
+    static var isMenuOpen: Bool { active?.isEnding == false }
     private let menu: NSMenu
     private weak var view: UIView?
     private let location: CGPoint

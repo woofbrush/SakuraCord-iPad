@@ -387,6 +387,9 @@ FILE_RULES = {
         (re.compile(r"override func pressureChange"), "func pressureChange"),
     ],
     # A bitmap context's origin is at the bottom, and UIKit draws text for one at the top.
+    "MediaViewer.swift": [
+        (re.compile(r"[.]onExitCommand\(perform: close\)"), lambda m: ".modifier(PadMediaArrowKeys(move: move))\n        " + m.group(0)),
+    ],
     "NativeEmojiPickerRow.swift": [
         (re.compile(r"(NSGraphicsContext[.]current[?][.]cgContext[.]clear\(CGRect\(x: 0, y: 0, width: cell, height: cell\)\)\n)( *)text[.]draw\(at: CGPoint\(x: \(cell - size[.]width\) / 2, y: \(cell - size[.]height\) / 2 [+] 1\)\)"),
          lambda m: m.group(1) + m.group(2) + "NSGraphicsContext.current?.cgContext.translateBy(x: 0, y: cell)\n" + m.group(2) + "NSGraphicsContext.current?.cgContext.scaleBy(x: 1, y: -1)\n" + m.group(2) + "text.draw(at: CGPoint(x: (cell - size.width) / 2, y: (cell - size.height) / 2 - 1))"),

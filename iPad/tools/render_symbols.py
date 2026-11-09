@@ -20,7 +20,8 @@ SYMBOLS = {
     "thread.symbolset/thread.svg": "thread",
 }
 POINT_HEIGHT = 18
-# Symbols whose inner contours are holes only under the even-odd rule.
+# Symbols whose outline's inner contour is a hole only under the even-odd rule; their
+# other shapes overlap themselves, which that rule would cut out.
 EVEN_ODD = {"gif_square"}
 
 
@@ -37,9 +38,11 @@ def main() -> None:
 
     for relative, name in SYMBOLS.items():
         glyph = regular_glyph((ASSETS / relative).read_text())
+        if name in EVEN_ODD:
+            glyph = glyph.replace("<path", '<path fill-rule="evenodd"', 1)
         document = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -140 280 240" width="1680" height="1440">'
-            f'<g fill="#000" fill-rule="{"evenodd" if name in EVEN_ODD else "nonzero"}">{glyph}</g></svg>'
+            f'<g fill="#000">{glyph}</g></svg>'
         )
         with tempfile.NamedTemporaryFile("w", suffix=".svg") as source, tempfile.NamedTemporaryFile(suffix=".png") as large:
             source.write(document)
