@@ -29,6 +29,8 @@
 >
 > Build it with `iPad/build.sh` ([instructions](docs/DEVELOPMENT.md#ipados-app)). The rest of this page describes [upstream SakuraCord](https://github.com/SakuraCordApp/SakuraCord) for macOS.
 
+> [!WARNING]
+> This is my first ever iOS/iPadOS related project, I don't even own a mac therefore I had to build/compile this with xtool, support would be appreciated.
 ---
 
 ## A Discord client that belongs on macOS
