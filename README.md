@@ -31,6 +31,7 @@
 
 > [!WARNING]
 > This is my first ever iOS/iPadOS related project, I don't even own a mac therefore I had to build/compile this with xtool, support would be appreciated.
+> I did this in my free time therefore this won't be as maintained as the mac build, pull requests would be appreciated.
 ---
 
 ## A Discord client that belongs on iPadOS
