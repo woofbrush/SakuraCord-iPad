@@ -206,6 +206,10 @@ FILE_RULES = {
     ],
     # A compact window shows one column at a time; the overflow button can hold everything.
     "WorkspaceToolbarItems.swift": [
+        # Touch targets, as Apple recommends for a finger.
+        (re.compile(r"[.]frame\(minHeight: 36\)"), ".frame(minHeight: 44)"),
+        (re.compile(r"[.]frame\(minWidth: 36\)"), ".frame(minWidth: 44)"),
+        (re.compile(r"static let iconSize: CGFloat = 17"), "static let iconSize: CGFloat = 21"),
         (re.compile(r"(    var presentsPanels = true\n)"),
          lambda m: m.group(1) + "    var gathersEverything = false\n    var privateChannel: Channel?\n"),
         (re.compile(r"        return ThreadActionsMenu\(sections: \[entries\]\)\n"),
@@ -382,7 +386,14 @@ FILE_RULES = {
     "NativeTimelineCanvasDictionaryLookup.swift": [
         (re.compile(r"override func pressureChange"), "func pressureChange"),
     ],
+    # A bitmap context's origin is at the bottom, and UIKit draws text for one at the top.
+    "NativeEmojiPickerRow.swift": [
+        (re.compile(r"(NSGraphicsContext[.]current[?][.]cgContext[.]clear\(CGRect\(x: 0, y: 0, width: cell, height: cell\)\)\n)( *)text[.]draw\(at: CGPoint\(x: \(cell - size[.]width\) / 2, y: \(cell - size[.]height\) / 2 [+] 1\)\)"),
+         lambda m: m.group(1) + m.group(2) + "NSGraphicsContext.current?.cgContext.translateBy(x: 0, y: cell)\n" + m.group(2) + "NSGraphicsContext.current?.cgContext.scaleBy(x: 1, y: -1)\n" + m.group(2) + "text.draw(at: CGPoint(x: (cell - size.width) / 2, y: (cell - size.height) / 2 - 1))"),
+    ],
     "NativeTimelineCanvasView.swift": [
+        (re.compile(r"(    var actions: NativeTimelineRowActions[?]\n)"), lambda m: m.group(1) + "    let padSwipe = PadTimelineSwipe()\n"),
+        (re.compile(r"(( *)super[.]init\(frame: frameRect\)\n)"), lambda m: m.group(1) + m.group(2) + "padSwipe.attach(to: self)\n"),
         (re.compile(r"mediaViewerHost[.]translatesAutoresizingMaskIntoConstraints = false"), "mediaViewerHost.translatesAutoresizingMaskIntoConstraints = true"),
         (re.compile(r"\n *pressureConfiguration = NSPressureConfiguration\([^\n]*"), ""),
     ],
@@ -534,6 +545,9 @@ FILE_RULES = {
         (re.compile(r"_ value: DragGesture[.]Value"), "_ value: PadRailDragValue"),
     ],
     "ServerRailView.swift": [
+        # iPadOS draws the hard edge as a visible box over the window's corner.
+        (re.compile(r"[.]scrollEdgeEffectStyle\([.]hard, for: [.]top\)"),
+         ".scrollEdgeEffectHidden(true, for: .top)\n        .mask { Rectangle().ignoresSafeArea(.container, edges: .bottom) }"),
         (re.compile(r"[.]onScrollPhaseChange [{] _, phase in\n\s+if drag[.]isScrolling"), lambda m: ".scrollDisabled(drag.draggedID != nil)\n        " + m.group(0)),
     ],
     # UIKit draws text for a top-left origin, which this bitmap context doesn't have.
@@ -604,11 +618,15 @@ FILE_RULES = {
 """),
     ],
     "InterfaceScale.swift": [
+        # Read at arm's length on a tablet: 100% in Settings is a little larger than on macOS.
+        (re.compile(r"(registrar[.]access\(self, keyPath: \\[.]factor\)\n( *))return storage[.]withLock [{] [$]0 [}]"),
+         lambda m: m.group(1) + "return (storage.withLock { $0 } * 1.1 * 100).rounded() / 100"),
         (re.compile(r"let isDefault = InterfaceScale[.]factor == 1 [|][|] isNested"), "let isDefault = isNested"),
         (re.compile(r"if !isDefault [{] size = InterfaceScale[.]controlSize\(size\) [}]"), "if !isDefault { size = InterfaceScale.controlSize(size == .regular ? .small : size) }"),
         (re.compile(r"guard InterfaceScale[.]factor != 1 else [{]\s*return [.]system\(style, design: design, weight: weight\)\s*[}]\s*"), ""),
     ],
     "ChatChromeMetrics.swift": [
+        (re.compile(r"static let toolbarIconButtonWidth: CGFloat = 37"), "static let toolbarIconButtonWidth: CGFloat = 44"),
         (re.compile(r"static let sidebarTitleCenterY: CGFloat = 25"), "static var sidebarTitleCenterY: CGFloat { UIWindow.ak_toolbarCenterY }"),
     ],
     "SakuraCordSignInExperience.swift": [

@@ -20,6 +20,8 @@ SYMBOLS = {
     "thread.symbolset/thread.svg": "thread",
 }
 POINT_HEIGHT = 18
+# Symbols whose inner contours are holes only under the even-odd rule.
+EVEN_ODD = {"gif_square"}
 
 
 def regular_glyph(svg: str) -> str:
@@ -37,7 +39,7 @@ def main() -> None:
         glyph = regular_glyph((ASSETS / relative).read_text())
         document = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -140 280 240" width="1680" height="1440">'
-            f'<g fill="#000">{glyph}</g></svg>'
+            f'<g fill="#000" fill-rule="{"evenodd" if name in EVEN_ODD else "nonzero"}">{glyph}</g></svg>'
         )
         with tempfile.NamedTemporaryFile("w", suffix=".svg") as source, tempfile.NamedTemporaryFile(suffix=".png") as large:
             source.write(document)

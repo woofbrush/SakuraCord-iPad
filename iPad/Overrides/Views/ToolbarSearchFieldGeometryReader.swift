@@ -106,7 +106,7 @@ struct PadToolbarSearchField: View {
         let isCollapsed = layout.collapsesSearch && !isFocused && text.isEmpty && tokens.isEmpty
         return HStack(spacing: isCollapsed ? 0 : 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
             ForEach(tokens.suffix(2)) { chip($0) }
             TextField(
                 "",
@@ -115,7 +115,7 @@ struct PadToolbarSearchField: View {
                 prompt: Text(model.isBrowsingGuildChannels ? "Search Channels" : model.messageSearchPromptTitle)
             )
             .textFieldStyle(.plain)
-            .font(.system(size: 15))
+            .font(.system(size: 17))
             .frame(width: isCollapsed ? 0 : nil)
             .opacity(isCollapsed ? 0 : 1)
             .focused($isFocused)
@@ -143,9 +143,9 @@ struct PadToolbarSearchField: View {
         }
         .padding(.horizontal, isCollapsed ? 0 : 12)
         .frame(
-            width: isCollapsed ? 38
+            width: isCollapsed ? 44
                 : layout.collapsesSearch ? layout.expandedSearchWidth : ChatChromeMetrics.toolbarSearchMaximumFieldWidth,
-            height: 38
+            height: 44
         )
         .contentShape(.rect)
         .onTapGesture { isFocused = true }
