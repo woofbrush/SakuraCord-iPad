@@ -80,23 +80,27 @@ clients, so compatibility can change as Discord evolves.
 
 ## Build from source
 
-Building SakuraCord requires macOS 27, Xcode 27 with Swift 6.4 and its Metal
-Toolchain, and Git. Install the shader compiler if needed with
-`xcodebuild -downloadComponent MetalToolchain`.
+SakuraCord for iPadOS builds with [xtool](https://github.com/xtool-org/xtool) on
+macOS, Linux or Windows through WSL, so a Mac isn't required. You need xtool, its
+Darwin SDK with the iOS 27 SDK, Python 3 and Git. On Linux and WSL you also need
+Swift 6.4 on your `PATH`.
 
 ```sh
-git clone https://github.com/SakuraCordApp/SakuraCord.git
-cd SakuraCord
-./script/install_git_hooks.sh
-git config --local --get core.hooksPath
-./script/setup_local_signing_identity.sh
-./script/build_and_run.sh --offline
+git clone https://github.com/woofbrush/SakuraCord-iPad.git
+cd SakuraCord-iPad
+xtool setup
+iPad/build.sh
 ```
 
-The hooks command must print `.githooks`. The offline demo does not contact
-Discord and is the safest way to explore the app from source. Developers can
-find authenticated launch modes, focused fixtures, validation commands, and
-local credential guidance in the [development guide](docs/DEVELOPMENT.md).
+`xtool setup` installs the Darwin SDK and only needs to run once. `iPad/build.sh`
+makes a release build and writes it to `iPad/xtool/SakuraCordPad.ipa`. On Linux or
+WSL, if the first build can't find the OpenSSL headers, run `iPad/build.sh` again:
+it links them once the dependencies have downloaded.
+
+The app requires iPadOS 27. Install the IPA with a sideloading tool such as
+[Impactor](https://github.com/claration/impactor), and keep its app extension,
+which screen sharing needs. See the
+[development guide](docs/DEVELOPMENT.md#ipados-app) for how the port is put together.
 
 ## Contributing and support
 
