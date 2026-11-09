@@ -438,6 +438,7 @@ FILE_RULES = {
         (re.compile(r"let isEnabled = mainWindowIsActive && intent[.]isEnabled"), "let isEnabled = intent.isEnabled"),
     ],
     "ComposerTextView.swift": [
+        (re.compile(r"layoutManager[.]usedRect\(for: textContainer\)[.]maxY"), "textView.ak_fittingTextHeight(width: proposedWidth)"),
         (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),
          "guard let textView = responder as? NSTextView else { return responder is UITextField }"),
         (re.compile(r"private func readAttachments\(from pasteboard: NSPasteboard\) -> Bool [{].*?\n    [}]\n", re.S),

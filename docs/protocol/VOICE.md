@@ -68,6 +68,7 @@ pushed call creation and ring once only when the readiness response is ringable.
 A group-DM start skips that read. Joining an existing call sends no readiness
 read or ring. An empty snapshot with no participants/rings is not an existing call.
 Decline posts stop-ringing for the current recipient without joining.
+Stop Ringing on a member of the call the account is in posts it for that recipient.
 Ring/stop-ringing mutations have one attempt; a later ring failure must not repeat
 a successful media join. A null-channel opcode 4 leaves the call.
 

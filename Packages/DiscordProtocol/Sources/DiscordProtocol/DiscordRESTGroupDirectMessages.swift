@@ -71,6 +71,16 @@ public extension DiscordRESTProvider {
         )
     }
 
+    /// Remove From Group: one bodyless `DELETE /channels/{channel}/recipients/{user}`,
+    /// never replayed. Only the group's owner may send it, and
+    /// `CHANNEL_RECIPIENT_REMOVE` then updates the member list.
+    func removeGroupDirectMessageRecipient(_ userID: UserID, from channelID: ChannelID) async throws {
+        _ = try await requestPrivateChannelChange(
+            channelID, path: "/channels/\(channelID)/recipients/\(userID)", method: "DELETE",
+            where: { $0.kind == .groupDirectMessage }
+        )
+    }
+
     /// Close DM: the same bodyless `DELETE /channels/{channel}` without `silent`,
     /// which hides a 1:1 DM without deleting its messages.
     func closeDirectMessage(_ channelID: ChannelID) async throws {

@@ -67,6 +67,28 @@ extension AppModel {
         }
     }
 
+    /// Only a group's owner can remove its other members.
+    func canRemoveFromGroupDirectMessage(_ userID: UserID, channelID: ChannelID) -> Bool {
+        guard let channel = groupDirectMessage(channelID), let currentUserID = currentUser?.id else { return false }
+        return channel.ownerID == currentUserID && userID != currentUserID && channel.recipients.contains { $0.id == userID }
+    }
+
+    /// Removes a member once; the provider's recipient event updates the group.
+    func removeFromGroupDirectMessage(_ user: User, channelID: ChannelID) {
+        guard canRemoveFromGroupDirectMessage(user.id, channelID: channelID), !accountTransitionIsActive else { return }
+        startAccountChildTask(account: accountSession()) { model, session in
+            do {
+                try await session.provider.removeGroupDirectMessageRecipient(user.id, from: channelID)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard model.isCurrentAccountSession(session) else { return }
+                DiscordAPIDiagnosticStore.shared.recordClientFailure(error)
+                model.errorMessage = "SakuraCord couldn’t remove \(user.displayName) from the group. \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Opens Discord's Leave Group confirmation. `/leave` passes its `silent`
     /// option as the checkbox's initial state.
     func presentLeaveGroupDirectMessage(for channelID: ChannelID, silently: Bool = false) {

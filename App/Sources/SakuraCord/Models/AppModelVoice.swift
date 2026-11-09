@@ -396,6 +396,35 @@ extension AppModel {
         }
     }
 
+    /// Someone this account's current call is still ringing.
+    func offersStopRinging(_ userID: UserID, channelID: ChannelID) -> Bool {
+        activeVoiceChannel?.id == channelID && privateCall(in: channelID)?.isRinging(userID) == true
+    }
+
+    /// Stops ringing one member, once; the call's own update confirms it.
+    func stopRinging(_ userID: UserID, channelID: ChannelID) {
+        guard offersStopRinging(userID, channelID: channelID) else { return }
+        startAccountChildTask(account: accountSession()) { model, session in
+            do {
+                try await session.provider.stopRingingPrivateCall(channelID: channelID, recipients: [userID])
+                guard model.isCurrentAccountSession(session), var call = model.privateCallsByChannel[channelID] else { return }
+                call.ongoingRings.removeAll { $0.recipientID == userID }
+                model.privateCallsByChannel[channelID] = call
+                if call.ongoingRings.isEmpty {
+                    model.endLocalOutgoingPrivateCallRing(channelID: channelID)
+                } else {
+                    model.reconcilePrivateCallSounds()
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard model.isCurrentAccountSession(session) else { return }
+                DiscordAPIDiagnosticStore.shared.recordClientFailure(error)
+                model.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func beginLocalOutgoingPrivateCallRing(channelID: ChannelID) {
         locallyStartedOutgoingPrivateCallRings.insert(channelID)
         outgoingPrivateCallRingTimeoutTasks[channelID]?.cancel()

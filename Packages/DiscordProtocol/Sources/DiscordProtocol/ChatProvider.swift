@@ -89,6 +89,8 @@ public protocol ChatProvider: Sendable {
     func editGroupDirectMessage(_ channelID: ChannelID, changes: GroupDirectMessageChanges) async throws -> Channel
     /// Leaves a group DM, optionally without notifying the other members.
     func leaveGroupDirectMessage(_ channelID: ChannelID, silently: Bool) async throws
+    /// Removes a member from a group DM the current user owns.
+    func removeGroupDirectMessageRecipient(_ userID: UserID, from channelID: ChannelID) async throws
     /// Closes a 1:1 DM, hiding it from the list without deleting its messages.
     func closeDirectMessage(_ channelID: ChannelID) async throws
     /// Moves a message request into the conversation list.
@@ -506,6 +508,10 @@ public extension ChatProvider {
 
     func leaveGroupDirectMessage(_ channelID: ChannelID, silently: Bool) async throws {
         throw ChatProviderError.invalidRequest("Leaving groups is unavailable for this session.")
+    }
+
+    func removeGroupDirectMessageRecipient(_ userID: UserID, from channelID: ChannelID) async throws {
+        throw ChatProviderError.invalidRequest("Removing group members is unavailable for this session.")
     }
 
     func closeDirectMessage(_ channelID: ChannelID) async throws {

@@ -174,13 +174,40 @@ open class NSTextView: UITextView, UITextViewDelegate {
         nsDelegate?.textView?(self, shouldChangeTextIn: range, replacementString: string) ?? true
     }
 
+    /// The height `text` needs at `width`, without insets. A UITextView that doesn't
+    /// scroll bounds its layout by its own height, so its layout manager never reports
+    /// a line past the ones already showing; only `sizeThatFits` measures beyond them.
+    public func ak_fittingTextHeight(width: CGFloat) -> CGFloat {
+        let fitted = sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        return max(0, fitted - textContainerInset.top - textContainerInset.bottom)
+    }
+
+    private var fittedContent: (width: CGFloat, text: String)?
+
     /// NSTextView grows with its content when vertically resizable; UITextView does not.
     private func fitHeightToContent() {
-        guard isVerticallyResizable, !isTracking else { return }
-        layoutManager.ensureLayout(for: textContainer)
-        let used = layoutManager.usedRect(for: textContainer).height
-        let height = min(max(minSize.height, ceil(used) + textContainerInset.top + textContainerInset.bottom), maxSize.height)
-        if abs(frame.height - height) > 0.5 { frame.size.height = height }
+        guard isVerticallyResizable, !isTracking, bounds.width > 0 else { return }
+        let content = text ?? ""
+        if let fittedContent, fittedContent.width == bounds.width, fittedContent.text == content { return }
+        fittedContent = (bounds.width, content)
+        let fitted = ceil(ak_fittingTextHeight(width: bounds.width) + textContainerInset.top + textContainerInset.bottom)
+        let height = min(max(minSize.height, fitted), maxSize.height)
+        guard abs(frame.height - height) > 0.5 else { return }
+        frame.size.height = height
+        guard let scrollView = enclosingScrollView, scrollView.documentView === self else { return }
+        scrollView.syncContentSize()
+        if height <= scrollView.bounds.height, scrollView.contentOffset.y != 0 { scrollView.contentOffset.y = 0 }
+    }
+
+    /// NSTextView keeps the caret inside its clip view as it edits. Waits for the
+    /// update that follows the edit, which may give the scroll view a new height.
+    private func revealCaretInScrollView() {
+        guard let scrollView = enclosingScrollView, scrollView.documentView === self, scrollView.hasVerticalScroller else { return }
+        Task { @MainActor [weak self, weak scrollView] in
+            guard let self, let scrollView, let end = self.selectedTextRange?.end else { return }
+            scrollView.syncContentSize()
+            scrollView.scrollRectToVisible(self.convert(self.caretRect(for: end), to: scrollView), animated: false)
+        }
     }
 
     override open func layoutSubviews() {
@@ -193,6 +220,7 @@ open class NSTextView: UITextView, UITextViewDelegate {
         let note = Notification(name: NSText.didChangeNotification, object: self)
         nsDelegate?.textDidChange?(note)
         NotificationCenter.default.post(note)
+        revealCaretInScrollView()
     }
 
     @objc open dynamic func doCommand(by selector: Selector) {}

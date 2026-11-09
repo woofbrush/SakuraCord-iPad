@@ -270,6 +270,11 @@ reject, and the GB-only "Are you sure you know this person?" confirmation. Not
 verified live: the Gateway events that follow a decision, whether Ignore also
 changes the relationship, and whether opening a request acknowledges it.
 
+Remove From Group is offered to a group's owner, for its other members. It sends one
+bodyless `DELETE /channels/{channel}/recipients/{user}`, Discord's documented route,
+without replay, and `CHANNEL_RECIPIENT_REMOVE` updates the members. It has not been
+compared with a captured official-client request.
+
 ## Protobuf preservation
 
 User-settings type 1 and Frecency type 2 are binary protocols. Preserve unknown

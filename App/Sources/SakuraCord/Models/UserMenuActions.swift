@@ -69,6 +69,9 @@ extension AppModel {
             if !isSelf, !user.isBot, relationship?.type != .blocked {
                 add("call", "Start a Call", "phone", .communication) { $0.callUserFromMenu(user) }
             }
+            if !isSelf, let channelID = context.channelID, offersStopRinging(user.id, channelID: channelID) {
+                add("stop-ringing", "Stop Ringing", "phone.down", .communication) { $0.stopRinging(user.id, channelID: channelID) }
+            }
             for nickname in nicknameMenuActions(for: user, in: context.guildID) {
                 add("nickname-\(nickname.title)", nickname.title, nickname.systemImage, .personal, enabled: !pending) { model in
                     model.nicknameMenuActions(for: user, in: context.guildID)
@@ -77,6 +80,12 @@ extension AppModel {
             }
         }
 
+        if !isLocalIdentity, let channelID = context.channelID,
+           canRemoveFromGroupDirectMessage(user.id, channelID: channelID) {
+            add("remove-from-group", "Remove From Group", "person.badge.minus", .destructive) {
+                $0.removeFromGroupDirectMessage(user, channelID: channelID)
+            }
+        }
         if !isSelf, !isLocalIdentity, !user.isBot {
             appendRelationshipMenuActions(for: user, relationship: relationship, pending: pending, location: location, add: add)
         }
