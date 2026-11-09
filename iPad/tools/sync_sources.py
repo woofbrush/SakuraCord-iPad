@@ -456,9 +456,15 @@ FILE_RULES = {
         (re.compile(r"(NSGraphicsContext[.]current[?][.]cgContext[.]clear\(CGRect\(x: 0, y: 0, width: cell, height: cell\)\)\n)( *)text[.]draw\(at: CGPoint\(x: \(cell - size[.]width\) / 2, y: \(cell - size[.]height\) / 2 [+] 1\)\)"),
          lambda m: m.group(1) + m.group(2) + "NSGraphicsContext.current?.cgContext.translateBy(x: 0, y: cell)\n" + m.group(2) + "NSGraphicsContext.current?.cgContext.scaleBy(x: 1, y: -1)\n" + m.group(2) + "text.draw(at: CGPoint(x: (cell - size.width) / 2, y: (cell - size.height) / 2 - 1))"),
     ],
+    "NativeTimelineCanvasPointerInput.swift": [
+        (re.compile(r"(    override func mouseMoved\(with event: NSEvent\) [{]\n)"),
+         lambda m: m.group(1) + "        padGIFStar.pointerMoved(to: convert(event.locationInWindow, from: nil))\n"),
+        (re.compile(r"(    override func mouseExited\(with event: NSEvent\) [{]\n)"),
+         lambda m: m.group(1) + "        padGIFStar.hide()\n"),
+    ],
     "NativeTimelineCanvasView.swift": [
-        (re.compile(r"(    var actions: NativeTimelineRowActions[?]\n)"), lambda m: m.group(1) + "    let padSwipe = PadTimelineSwipe()\n"),
-        (re.compile(r"(( *)super[.]init\(frame: frameRect\)\n)"), lambda m: m.group(1) + m.group(2) + "padSwipe.attach(to: self)\n"),
+        (re.compile(r"(    var actions: NativeTimelineRowActions[?]\n)"), lambda m: m.group(1) + "    let padSwipe = PadTimelineSwipe()\n    let padGIFStar = PadGIFFavoriteStar()\n"),
+        (re.compile(r"(( *)super[.]init\(frame: frameRect\)\n)"), lambda m: m.group(1) + m.group(2) + "padSwipe.attach(to: self)\n" + m.group(2) + "padGIFStar.attach(to: self)\n"),
         (re.compile(r"mediaViewerHost[.]translatesAutoresizingMaskIntoConstraints = false"), "mediaViewerHost.translatesAutoresizingMaskIntoConstraints = true"),
         (re.compile(r"\n *pressureConfiguration = NSPressureConfiguration\([^\n]*"), ""),
     ],

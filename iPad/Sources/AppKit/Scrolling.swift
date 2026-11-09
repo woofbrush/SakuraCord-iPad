@@ -81,8 +81,13 @@ open class NSScrollView: UIScrollView, UIScrollViewDelegate, @unchecked Sendable
     }
 
     public func syncContentSize() {
-        let size = documentView?.frame.size ?? .zero
+        var size = documentView?.frame.size ?? .zero
+        // AppKit doesn't pan sideways without a horizontal scroller; UIKit would, whenever
+        // the document is wider than the view, as a conversation's is while a column moves.
+        let locksHorizontal = !hasHorizontalScroller && horizontalScrollElasticity != .allowed
+        if locksHorizontal { size.width = min(size.width, bounds.width) }
         if contentSize != size { contentSize = size }
+        if locksHorizontal, contentOffset.x != 0 { contentOffset.x = 0 }
     }
 
     open func scrollViewDidScroll(_: UIScrollView) {
