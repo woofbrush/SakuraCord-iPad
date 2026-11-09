@@ -102,7 +102,9 @@ struct PadToolbarSearchField: View {
         let text = friendsSearch ? model.friendsSearchText : local ? onboarding.channelSearch : search.queryText
         let wantsFocus = friendsSearch ? friends.isSearchFocused
             : local ? onboarding.isChannelSearchFocused : search.isInputFocused
-        return HStack(spacing: 6) {
+        let layout = PadLayout.shared
+        let isCollapsed = layout.collapsesSearch && !isFocused && text.isEmpty && tokens.isEmpty
+        return HStack(spacing: isCollapsed ? 0 : 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .semibold))
             ForEach(tokens.suffix(2)) { chip($0) }
@@ -114,6 +116,8 @@ struct PadToolbarSearchField: View {
             )
             .textFieldStyle(.plain)
             .font(.system(size: 15))
+            .frame(width: isCollapsed ? 0 : nil)
+            .opacity(isCollapsed ? 0 : 1)
             .focused($isFocused)
             .submitLabel(.search)
             .autocorrectionDisabled()
@@ -137,8 +141,12 @@ struct PadToolbarSearchField: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 12)
-        .frame(width: ChatChromeMetrics.toolbarSearchMaximumFieldWidth, height: 38)
+        .padding(.horizontal, isCollapsed ? 0 : 12)
+        .frame(
+            width: isCollapsed ? 38
+                : layout.collapsesSearch ? layout.expandedSearchWidth : ChatChromeMetrics.toolbarSearchMaximumFieldWidth,
+            height: 38
+        )
         .contentShape(.rect)
         .onTapGesture { isFocused = true }
         .opacity(PadToolbarSearch.shared.alpha)

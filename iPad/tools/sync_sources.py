@@ -177,11 +177,70 @@ FILE_RULES = {
     ],
     # iPadOS draws its sidebar toggle where macOS draws the server name; keep the
     # toggle at the sidebar's trailing edge, which is where macOS places it.
+    "SettingsView.swift": [
+        (re.compile(r"minWidth: InterfaceScale[.]windowLength\(1060, axis: [.]horizontal\)"), "minWidth: 0"),
+    ],
+    # A compact window shows one column at a time; the overflow button can hold everything.
+    "WorkspaceToolbarItems.swift": [
+        (re.compile(r"(    var presentsPanels = true\n)"),
+         lambda m: m.group(1) + "    var gathersEverything = false\n    var privateChannel: Channel?\n"),
+        (re.compile(r"        return ThreadActionsMenu\(sections: \[entries\]\)\n"),
+         "        if gathersEverything { entries += padGatheredEntries }\n        return ThreadActionsMenu(sections: [entries])\n"),
+        (re.compile(r"(    private var menu: ThreadActionsMenu [{]\n)"),
+         lambda m: """    private func padCall(_ channel: Channel, withVideo: Bool) {
+        Task { [model] in
+            if model.joinablePrivateCall(in: channel.id) != nil {
+                await model.joinPrivateCall(in: channel, withVideo: withVideo)
+            } else {
+                await model.startPrivateCall(in: channel, withVideo: withVideo)
+            }
+        }
+    }
+
+    private var padGatheredEntries: [ThreadMenuEntry] {
+        var entries: [ThreadMenuEntry] = []
+        if let channel = privateChannel, model.activeVoiceChannel?.id != channel.id {
+            entries.append(ThreadMenuEntry(
+                id: "voice-call", title: "Start Voice Call", systemImage: "phone.fill",
+                content: .action { padCall(channel, withVideo: false) }
+            ))
+            entries.append(ThreadMenuEntry(
+                id: "video-call", title: "Start Video Call", systemImage: "video.fill",
+                content: .action { padCall(channel, withVideo: true) }
+            ))
+        }
+        entries.append(ThreadMenuEntry(
+            id: "members", title: "Members", systemImage: "person.2", content: .action(model.toggleMemberInspector)
+        ))
+        return entries
+    }
+
+""" + m.group(1)),
+    ],
     "RootView.swift": [
+        (re.compile(r"(    @State private var columnVisibility: NavigationSplitViewVisibility = [.]all\n)"),
+         lambda m: m.group(1) + "    @Environment(\\.horizontalSizeClass) private var padSizeClass\n    @State private var padCompactColumn = NavigationSplitViewColumn.detail\n"),
+        (re.compile(r"NavigationSplitView\(columnVisibility: [$]columnVisibility\) [{]"),
+         lambda m: "NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $padCompactColumn) {"),
+        (re.compile(r"selection: [$]model[.]channelSidebarSelection,"),
+         lambda m: "selection: Binding(\n                        get: { model.channelSidebarSelection },\n                        set: { model.channelSidebarSelection = $0; padCompactColumn = .detail }\n                    ),"),
+        (re.compile(r"columnVisibility = columnVisibility == [.]detailOnly [?] [.]all : [.]detailOnly"),
+         lambda m: "if padSizeClass == .compact {\n                    padCompactColumn = padCompactColumn == .sidebar ? .detail : .sidebar\n                } else {\n                    " + m.group(0) + "\n                }"),
+        (re.compile(r"if columnVisibility != [.]detailOnly [{](\n *if model[.]isSwitchingAccounts)"),
+         lambda m: "if columnVisibility != .detailOnly && (padSizeClass != .compact || padCompactColumn == .sidebar) {" + m.group(1)),
+        (re.compile(r"[.]interfaceScaleRoot\(\)(\n( *)[.]onGeometryChange\(for: CGFloat[.]self\) [{] proxy in\n *proxy[.]frame\(in: [.]global\)[.]minX)"),
+         lambda m: ".interfaceScaleRoot()\n" + m.group(2) + ".navigationBarBackButtonHidden(padSizeClass == .compact)\n" + m.group(2) + ".onGeometryChange(for: CGFloat.self) { $0.size.width } action: { PadLayout.shared.detailWidthChanged($0, model: model) }" + m.group(1)),
+        (re.compile(r"[.]environment\(\\[.]composerDropInteraction, composerDropInteraction\)"),
+         lambda m: ".modifier(PadCompactColumnFollower(model: model, column: $padCompactColumn))\n        " + m.group(0)),
+        (re.compile(r"\s*[.]frame\(\s*minWidth: InterfaceScale[.]windowLength\(860, axis: [.]horizontal\),\s*minHeight: InterfaceScale[.]windowLength\(600, axis: [.]vertical\)\s*\)"), ""),
+        (re.compile(r"(                MemberInspectorToolbarButton\(model: model\)\n            [}]\n)(        [}]\n        [.]titlebarButtons\(\))"),
+         lambda m: m.group(1) + "            ConversationOverflowToolbarMenu(\n                model: model,\n                pinsChannelID: pinsChannelID,\n                offersThreads: offersThreads,\n                presentsPanels: presentsPanels,\n                gathersEverything: true,\n                privateChannel: selectedPrivateChannel\n            )\n" + m.group(2)),
+        (re.compile(r"(private func fullWidthTitlebarActions\([^\n]*-> some View [{]\n)(        HStack\(spacing: ChatChromeMetrics[.]toolbarItemEdgeInset\) [{].*?\n        [}])\n(        [.]titlebarButtons\(\))", re.S),
+         lambda m: m.group(1) + "        ViewThatFits(in: .horizontal) {\n" + m.group(2) + "\n            HStack(spacing: ChatChromeMetrics.toolbarItemEdgeInset) {\n                ConversationOverflowToolbarMenu(model: model, pinsChannelID: thread.id, offersThreads: false, presentsPanels: presentsPanels, gathersEverything: true)\n                ThreadActionsToolbarMenu(model: model, thread: thread, surface: .fullView)\n            }\n        }\n" + m.group(3)),
         (re.compile(r"[.]navigationSplitViewColumnWidth\(\s*min: ChatChromeMetrics[.]serverRailWidth"),
          lambda m: ".toolbar(removing: .sidebarToggle)\n            .toolbar { ToolbarItem(placement: .topBarTrailing) { padSidebarToggle } }\n            " + m.group(0)),
         (re.compile(r"[.]toolbar [{]\s*detailToolbar\s*[}]"),
-         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible && PadToolbarSearch.shared.alpha >= 0.5 ? .visible : .hidden)\n            }"),
+         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly || padSizeClass == .compact { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible && PadToolbarSearch.shared.alpha >= 0.5 ? .visible : .hidden)\n            }"),
         (re.compile(r"\n +[.]modifier\(MessageSearchToolbarModifier\(\s*model: model,\s*search: search,\s*prompt: prompt\s*\)\)"), ""),
         # Below the real toolbar row: on iPadOS that row is inside the split view, not above the root.
         (re.compile(r"[.]padding\([.]trailing, toolbarMetrics[.]trailingInset\)"),
@@ -348,6 +407,19 @@ FILE_RULES = {
     # macOS hangs these from the window's titlebar; iPadOS has none to reach, so the
     # same items sit over the window's top edge, on the toolbar's row.
     "WorkspaceTitlebar.swift": [
+        # Items sit in the window's top safe area, and each is centered on the search field's line.
+        (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M),
+         lambda m: f"{m.group(0)}\n{m.group(1)}host.safeAreaRegions = []\n{m.group(1)}host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]"),
+        (re.compile(r"^( *)container[.]addSubview\(host[.]view\)$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.frame = container.bounds"),
+        (re.compile(r"        let proposal = ProposedViewSize\(bounds[.]size\)\n.*?        let ideal = content[.]sizeThatFits\([.]unspecified\)\n", re.S),
+         """        let ideal = content.sizeThatFits(.unspecified)
+        let proposal = ProposedViewSize(width: bounds.width, height: ideal.height)
+        let minX = isTrailing ? bounds.maxX - content.sizeThatFits(proposal).width : bounds.minX
+        content.place(at: CGPoint(x: minX, y: bounds.midY), anchor: .leading, proposal: proposal)
+"""),
+        # In a narrow workspace a side chat covers the conversation rather than narrowing it.
+        (re.compile(r"visibleMaxX = min\(span[.]upperBound, fullWidth[?][.]minX [?][?] [.]infinity\)"),
+         lambda m: "let padCover = PadLayout.isNarrow(span.upperBound - span.lowerBound)\n                    ? geometry.columns.lazy.filter { $0.id.hasPrefix(\"side-\") }.map(\\.minX).min() : nil\n                visibleMaxX = min(span.upperBound, fullWidth?.minX ?? .infinity, padCover ?? .infinity)"),
         (re.compile(r"private func fadeSearch\(_ alpha: CGFloat\) [{].*?\n    [}]\n", re.S),
          """private func fadeSearch(_ alpha: CGFloat) {
         if PadToolbarSearch.shared.alpha != alpha { PadToolbarSearch.shared.alpha = alpha }
@@ -398,6 +470,24 @@ FILE_RULES = {
     ],
     # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
     "WorkspaceColumnsHost.swift": [
+        # Too narrow to share: columns slide over the conversation and hide it, opaque.
+        (re.compile(r"max\(paneWidth, ChatChromeMetrics[.]sideConversationMinimumWidth\)"), "padPaneWidth"),
+        (re.compile(r": max\(inspectorWidth, ChatChromeMetrics[.]memberListWidth\)"), ": min(max(inspectorWidth, ChatChromeMetrics.memberListWidth), bounds.width)"),
+        (re.compile(r"(    private func width\(of column: WorkspaceColumnsHost[.]Column\) -> CGFloat [{]\n)"),
+         lambda m: """    private var padIsNarrow: Bool { PadLayout.isNarrow(bounds.width) }
+
+    private var padPaneWidth: CGFloat {
+        padIsNarrow ? bounds.width : max(paneWidth, ChatChromeMetrics.sideConversationMinimumWidth)
+    }
+
+""" + m.group(1)),
+        (re.compile(r"[?] padPaneWidth(\n *: trailingCoverage)"), lambda m: "? (padIsNarrow ? 0 : padPaneWidth)" + m.group(1)),
+        (re.compile(r"(private func trailingCoverage\(at time: CFTimeInterval, provisionalStart: CFTimeInterval[?]\) -> CGFloat [{]\n)"),
+         lambda m: m.group(1) + "        if padIsNarrow { return 0 }\n"),
+        (re.compile(r"covered = paneWidth\n"), "covered = padIsNarrow ? 0 : paneWidth\n"),
+        (re.compile(r"island[.]column[.]isDeparting [?] covered : shown"), "island.column.isDeparting && !padIsNarrow ? covered : shown"),
+        (re.compile(r"(( *)let shown = width [*] island[.]reveal[.]value\(at: time\)\n)"),
+         lambda m: m.group(1) + m.group(2) + "island.view.backgroundColor = padIsNarrow ? .secondarySystemBackground : nil\n"),
         (re.compile(r"return AnyView\(content[.]environment\(\\[.]self, environment\)\)"), r"return AnyView(PadToolbarSafeArea(content: content.environment(\\.self, environment)))"),
         # UIHostingController's view is opaque by default; NSHostingController's is transparent.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),
