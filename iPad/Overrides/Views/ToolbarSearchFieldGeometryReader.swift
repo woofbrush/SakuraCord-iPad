@@ -102,7 +102,7 @@ struct PadToolbarSearchField: View {
         let text = friendsSearch ? model.friendsSearchText : local ? onboarding.channelSearch : search.queryText
         let wantsFocus = friendsSearch ? friends.isSearchFocused
             : local ? onboarding.isChannelSearchFocused : search.isInputFocused
-        let layout = PadLayout.shared
+        let layout = PadLayout.forModel(model)
         let isCollapsed = layout.collapsesSearch && !isFocused && text.isEmpty && tokens.isEmpty
         return HStack(spacing: isCollapsed ? 0 : 6) {
             Image(systemName: "magnifyingglass")

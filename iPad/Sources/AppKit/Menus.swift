@@ -150,9 +150,13 @@ public final class NSMenu: NSObject {
         MenuPresenter.present(self, at: location, in: view, liftsContent: false)
     }
 
-    /// A right click or long press, whose menu is about what it landed on. A button's
-    /// menu must not lift that: UIKit would attach the menu to the lifted content instead.
+    /// A right click: the menu opens at the pointer, as on macOS.
     func popUpForContextClick(at location: CGPoint, in view: UIView) {
+        MenuPresenter.present(self, at: location, in: view, liftsContent: false)
+    }
+
+    /// A long press lifts what the finger landed on, which the finger is covering.
+    func popUpForLongPress(at location: CGPoint, in view: UIView) {
         MenuPresenter.present(self, at: location, in: view, liftsContent: true)
     }
 
@@ -207,9 +211,12 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
 
     static func present(_ menu: NSMenu, at location: CGPoint, in view: UIView, liftsContent: Bool) {
         // UIKit shows a menu presented during the last one's dismissal without its
-        // dimming, then takes it away when that dismissal finishes.
-        if let active, active.isEnding {
+        // dimming, then takes it away when that dismissal finishes. One presented over
+        // an open menu fares no better, so that menu closes first.
+        if let active {
             active.replacement = { present(menu, at: location, in: view, liftsContent: liftsContent) }
+            if !active.isEnding { active.interaction?.dismissMenu() }
+            active.replaceIfNeverDismissed()
             return
         }
         let presenter = MenuPresenter(menu: menu, view: view, location: location, liftsContent: liftsContent)
@@ -226,6 +233,17 @@ private final class MenuPresenter: NSObject, UIContextMenuInteractionDelegate {
         }
         typealias Present = @convention(c) (AnyObject, Selector, CGPoint) -> Void
         unsafeBitCast(method_getImplementation(method), to: Present.self)(interaction, selector, location)
+    }
+
+    /// A menu that never appeared never reports its end, and would block every later one.
+    private func replaceIfNeverDismissed() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [self] in
+            guard Self.active === self, let replacement else { return }
+            self.replacement = nil
+            if let interaction { view?.removeInteraction(interaction) }
+            Self.active = nil
+            replacement()
+        }
     }
 
     /// Fallback if the private point-anchored presentation ever disappears.

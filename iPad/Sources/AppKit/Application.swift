@@ -66,7 +66,7 @@ public final class NSApplication: NSObject {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
     }
 
-    public var keyWindow: UIWindow? { windows.first(where: \.isKeyWindow) ?? windows.first }
+    public var keyWindow: UIWindow? { UIWindow.ak_lastInteracted ?? windows.first(where: \.isKeyWindow) ?? windows.first }
     public var mainWindow: UIWindow? { keyWindow }
     public var isActive: Bool { UIApplication.shared.applicationState == .active }
     public var currentEvent: NSEvent? { NSEvent.current }

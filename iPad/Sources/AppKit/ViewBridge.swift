@@ -584,6 +584,9 @@ extension UIResponder {
 extension UIApplication {
     /// Key events pass through local monitors before reaching the responder chain, as in AppKit.
     @objc func ak_swizzled_sendEvent(_ event: UIEvent) {
+        if event.type == .touches, let window = event.allTouches?.first?.window {
+            UIWindow.ak_lastInteracted = window
+        }
         if let pressesEvent = event as? UIPressesEvent {
             for press in pressesEvent.allPresses where press.phase == .began {
                 NSEvent.currentModifiers = NSEvent.ModifierFlags(press.key?.modifierFlags ?? [])
@@ -621,6 +624,8 @@ extension UIWindow {
 
     /// Window-space centre of the toolbar row. The system places that row differently
     /// in a window and in full screen, so the toolbar search field measures it.
+    /// Each scene has a key window of its own; this is the one in use.
+    public nonisolated(unsafe) static weak var ak_lastInteracted: UIWindow?
     public nonisolated(unsafe) static var ak_toolbarCenterY: CGFloat = 27
     /// Where content that scrolls beneath the toolbar comes to rest.
     public nonisolated(unsafe) static var ak_toolbarBottomY: CGFloat = 58
@@ -747,7 +752,14 @@ final class PointerRouter: NSObject {
         NSEvent.lastLocation = location
         let event = NSEvent(type: .rightMouseDown, location: location, window: view.window, clickCount: 1, buttonNumber: 1)
         NSEvent.current = event
-        view.menu(for: event)?.popUpForContextClick(at: recognizer.location(in: view), in: view)
+        guard let menu = view.menu(for: event) else { return }
+        let point = recognizer.location(in: view)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        // Hands the finger back: a menu shown under a touch that is still down takes
+        // the lift for a tap outside it and closes.
+        recognizer.isEnabled = false
+        recognizer.isEnabled = true
+        Task { @MainActor in menu.popUpForLongPress(at: point, in: view) }
     }
 
     @objc func scroll(_ recognizer: UIPanGestureRecognizer) {

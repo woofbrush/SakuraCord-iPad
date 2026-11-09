@@ -251,19 +251,13 @@ FILE_RULES = {
          lambda m: ".interfaceScaleRoot()\n            .containerBackground(.clear, for: .navigation)" + m.group(1)),
         (re.compile(r'[.]navigationTitle\(""\)'), lambda m: '.containerBackground(.clear, for: .navigation)\n            ' + m.group(0)),
         (re.compile(r"(    @State private var columnVisibility: NavigationSplitViewVisibility = [.]all\n)"),
-         lambda m: m.group(1) + "    @Environment(\\.horizontalSizeClass) private var padSizeClass\n    @State private var padCompactColumn = NavigationSplitViewColumn.detail\n"),
-        (re.compile(r"NavigationSplitView\(columnVisibility: [$]columnVisibility\) [{]"),
-         lambda m: "NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $padCompactColumn) {"),
+         lambda m: m.group(1) + "    @State private var padWindowIsNarrow = false\n    @State private var padWindowWidth: CGFloat = 0\n"),
         (re.compile(r"selection: [$]model[.]channelSidebarSelection,"),
-         lambda m: "selection: Binding(\n                        get: { model.channelSidebarSelection },\n                        set: { model.channelSidebarSelection = $0; padCompactColumn = .detail }\n                    ),"),
-        (re.compile(r"columnVisibility = columnVisibility == [.]detailOnly [?] [.]all : [.]detailOnly"),
-         lambda m: "if padSizeClass == .compact {\n                    padCompactColumn = padCompactColumn == .sidebar ? .detail : .sidebar\n                } else {\n                    " + m.group(0) + "\n                }"),
-        (re.compile(r"if columnVisibility != [.]detailOnly [{](\n *if model[.]isSwitchingAccounts)"),
-         lambda m: "if columnVisibility != .detailOnly && (padSizeClass != .compact || padCompactColumn == .sidebar) {" + m.group(1)),
+         lambda m: "selection: Binding(\n                        get: { model.channelSidebarSelection },\n                        set: { model.channelSidebarSelection = $0; padCollapseSidebar() }\n                    ),"),
         (re.compile(r"[.]interfaceScaleRoot\(\)(\n( *)[.]onGeometryChange\(for: CGFloat[.]self\) [{] proxy in\n *proxy[.]frame\(in: [.]global\)[.]minX)"),
-         lambda m: ".interfaceScaleRoot()\n" + m.group(2) + ".navigationBarBackButtonHidden(padSizeClass == .compact)\n" + m.group(2) + ".onGeometryChange(for: CGFloat.self) { $0.size.width } action: { PadLayout.shared.detailWidthChanged($0, model: model) }" + m.group(1)),
+         lambda m: ".interfaceScaleRoot()\n" + m.group(2) + ".frame(width: padWindowIsNarrow && columnVisibility != .detailOnly ? padWindowWidth : nil, alignment: .leading)\n" + m.group(2) + ".frame(maxWidth: .infinity, alignment: .leading)\n" + m.group(2) + ".onGeometryChange(for: CGFloat.self) { $0.size.width } action: { PadLayout.forModel(model).detailWidthChanged($0, model: model) }" + m.group(1)),
         (re.compile(r"[.]environment\(\\[.]composerDropInteraction, composerDropInteraction\)"),
-         lambda m: ".modifier(PadCompactColumnFollower(model: model, column: $padCompactColumn))\n        " + m.group(0)),
+         lambda m: ".modifier(PadConversationFollower(model: model, opened: padCollapseSidebar))\n        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { padWindowWidthChanged($0) }\n        " + m.group(0)),
         (re.compile(r"\s*[.]frame\(\s*minWidth: InterfaceScale[.]windowLength\(860, axis: [.]horizontal\),\s*minHeight: InterfaceScale[.]windowLength\(600, axis: [.]vertical\)\s*\)"), ""),
         (re.compile(r"(                MemberInspectorToolbarButton\(model: model\)\n            [}]\n)(        [}]\n        [.]titlebarButtons\(\))"),
          lambda m: m.group(1) + "            ConversationOverflowToolbarMenu(\n                model: model,\n                pinsChannelID: pinsChannelID,\n                offersThreads: offersThreads,\n                presentsPanels: presentsPanels,\n                gathersEverything: true,\n                privateChannel: selectedPrivateChannel\n            )\n" + m.group(2)),
@@ -272,7 +266,7 @@ FILE_RULES = {
         (re.compile(r"[.]navigationSplitViewColumnWidth\(\s*min: ChatChromeMetrics[.]serverRailWidth"),
          lambda m: ".toolbar(removing: .sidebarToggle)\n            .toolbar { ToolbarItem(placement: .topBarTrailing) { padSidebarToggle } }\n            " + m.group(0)),
         (re.compile(r"[.]toolbar [{]\s*detailToolbar\s*[}]"),
-         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly || padSizeClass == .compact { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible && PadToolbarSearch.shared.alpha >= 0.5 ? .visible : .hidden)\n            }"),
+         ".toolbar {\n                detailToolbar\n                ToolbarItem(placement: .topBarLeading) { if columnVisibility == .detailOnly { padSidebarToggle } }\n                ToolbarItem(id: \"pad-search\") { PadToolbarSearchField(model: model) }\n                    .sharedBackgroundVisibility(PadToolbarSearch.shared.isVisible && PadToolbarSearch.shared.alpha >= 0.5 ? .visible : .hidden)\n            }"),
         (re.compile(r"\n +[.]modifier\(MessageSearchToolbarModifier\(\s*model: model,\s*search: search,\s*prompt: prompt\s*\)\)"), ""),
         # Below the real toolbar row: on iPadOS that row is inside the split view, not above the root.
         (re.compile(r"[.]padding\([.]trailing, toolbarMetrics[.]trailingInset\)"),
@@ -283,9 +277,28 @@ FILE_RULES = {
         (re.compile(r"([.]overlay\(alignment: [.]topLeading\) [{]\s*ZStack\(alignment: [.]topLeading\) [{]\s*SakuraCordTextInputAccentBridge)"),
          lambda m: ".overlay(alignment: .topTrailing) { padToolbarPanels }\n        " + m.group(1)),
         (re.compile(r"(    @ViewBuilder private var workspace: some View [{])"),
-         lambda m: """    private var padSidebarToggle: some View {
+         lambda m: """    private func padCollapseSidebar() {
+        guard padWindowIsNarrow, columnVisibility != .detailOnly else { return }
+        withAnimation(model.animates(.sidebar) ? .spring(ChatChromeMetrics.sidebarSpring) : nil) {
+            columnVisibility = .detailOnly
+        }
+    }
+
+    /// A window too narrow for both shows the sidebar on request, over the conversation.
+    private func padWindowWidthChanged(_ width: CGFloat) {
+        guard width > 0 else { return }
+        padWindowWidth = width
+        let isNarrow = width < ChatChromeMetrics.serverRailWidth + InterfaceScale.metric(590)
+        guard isNarrow != padWindowIsNarrow else { return }
+        padWindowIsNarrow = isNarrow
+        columnVisibility = isNarrow ? .detailOnly : .all
+    }
+
+    private var padSidebarToggle: some View {
         Button {
-            NotificationCenter.default.post(name: .sakuracordToggleChannelSidebar, object: nil)
+            withAnimation(model.animates(.sidebar) ? .spring(ChatChromeMetrics.sidebarSpring) : nil) {
+                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
         } label: {
             Label("Toggle Sidebar", systemImage: "sidebar.leading")
         }
@@ -390,6 +403,55 @@ FILE_RULES = {
     "MediaViewer.swift": [
         (re.compile(r"[.]onExitCommand\(perform: close\)"), lambda m: ".modifier(PadMediaArrowKeys(move: move))\n        " + m.group(0)),
     ],
+    "ConnectionBrand.swift": [
+        (re.compile(r"let resourceURL = Bundle[.]module[.]url\("),
+         lambda m: 'let resourceURL = Bundle.module.url(forResource: "pad-\\(resourceName)", withExtension: "png", subdirectory: "ConnectionIconsPNG") ?? Bundle.module.url(forResource: "pad-\\(resourceName)", withExtension: "png") ?? Bundle.module.url('),
+    ],
+    # A foreground window is often not the one being read on iPadOS, and banners show over it.
+    "AppModelNotifications.swift": [
+        (re.compile(r"if applicationIsActive [|][|] !notificationPreferences[.]isEnabled [{]"), "if !notificationPreferences.isEnabled {"),
+    ],
+    "MediaViewerContent.swift": [
+        (re.compile(r"@GestureState private var liveMagnification"), "@State private var liveMagnification"),
+        (re.compile(r"@GestureState private var liveTranslation"), "@State private var liveTranslation"),
+        (re.compile(r"\n *[.]gesture\(\s*MagnifyGesture\(\).*?(\n *[.]accessibilityLabel\(\"Media image\"\))", re.S), lambda m: m.group(1)),
+        (re.compile(r"( *)MediaViewerTrackpadPanBridge\(\n"),
+         lambda m: """                PadMediaZoomGestures(
+                    imageFrame: transformedFrame,
+                    isZoomed: effectiveScale > 1,
+                    magnifyChanged: { magnification in
+                        liveMagnification = magnification
+                        guard MediaViewerInteractionModel.isAtMinimumScale(scale), magnification < 1 else {
+                            updatePinchDismissal(magnification: 1)
+                            return
+                        }
+                        updatePinchDismissal(magnification: magnification)
+                    },
+                    magnifyEnded: { magnification in
+                        liveMagnification = 1
+                        if MediaViewerInteractionModel.isAtMinimumScale(scale), magnification < 1,
+                           finishPinchDismissal(magnification) { return }
+                        interaction.commitScale(scale * magnification)
+                        interaction.commitOffset(MediaViewerLayoutPolicy.clampedOffset(
+                            effectiveOffset, scale: scale * magnification,
+                            fittedSize: fittedSize, availableSize: availableSize
+                        ))
+                    },
+                    dragChanged: { if effectiveScale > 1 { liveTranslation = $0 } },
+                    dragEnded: { translation in
+                        liveTranslation = .zero
+                        interaction.commitOffset(MediaViewerLayoutPolicy.clampedOffset(
+                            CGSize(width: offset.width + translation.width, height: offset.height + translation.height),
+                            scale: scale, fittedSize: fittedSize, availableSize: availableSize
+                        ))
+                    },
+                    doubleTapped: interaction.toggleZoom
+                )
+                .frame(width: availableSize.width, height: availableSize.height)
+                .allowsHitTesting(false)
+
+""" + m.group(0)),
+    ],
     "NativeEmojiPickerRow.swift": [
         (re.compile(r"(NSGraphicsContext[.]current[?][.]cgContext[.]clear\(CGRect\(x: 0, y: 0, width: cell, height: cell\)\)\n)( *)text[.]draw\(at: CGPoint\(x: \(cell - size[.]width\) / 2, y: \(cell - size[.]height\) / 2 [+] 1\)\)"),
          lambda m: m.group(1) + m.group(2) + "NSGraphicsContext.current?.cgContext.translateBy(x: 0, y: cell)\n" + m.group(2) + "NSGraphicsContext.current?.cgContext.scaleBy(x: 1, y: -1)\n" + m.group(2) + "text.draw(at: CGPoint(x: (cell - size.width) / 2, y: (cell - size.height) / 2 - 1))"),
@@ -449,6 +511,23 @@ FILE_RULES = {
     # macOS hangs these from the window's titlebar; iPadOS has none to reach, so the
     # same items sit over the window's top edge, on the toolbar's row.
     "WorkspaceTitlebar.swift": [
+        # Windows place their own columns; one shared geometry would move every window's toolbar.
+        (re.compile(r"\n *WorkspaceColumnsGeometry[.]shared[.]observe\(self\)"), ""),
+        (re.compile(r"static let shared = WorkspaceColumnsGeometry\(\)\n"),
+         """private static let detached = WorkspaceColumnsGeometry()
+    private static let byWindow = NSMapTable<NSWindow, WorkspaceColumnsGeometry>.weakToStrongObjects()
+
+    static func forWindow(_ window: NSWindow?) -> WorkspaceColumnsGeometry {
+        guard let window else { return detached }
+        if let geometry = byWindow.object(forKey: window) { return geometry }
+        let geometry = WorkspaceColumnsGeometry()
+        byWindow.setObject(geometry, forKey: window)
+        return geometry
+    }
+"""),
+        (re.compile(r"let geometry = WorkspaceColumnsGeometry[.]shared\n"),
+         "let geometry = WorkspaceColumnsGeometry.forWindow(window)\n        geometry.observe(self)\n"),
+        (re.compile(r"WorkspaceColumnsGeometry[.]shared"), "WorkspaceColumnsGeometry.forWindow(window)"),
         # Items sit in the window's top safe area, and each is centered on the search field's line.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M),
          lambda m: f"{m.group(0)}\n{m.group(1)}host.safeAreaRegions = []\n{m.group(1)}host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]"),
@@ -512,6 +591,7 @@ FILE_RULES = {
     ],
     # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
     "WorkspaceColumnsHost.swift": [
+        (re.compile(r"WorkspaceColumnsGeometry[.]shared"), "WorkspaceColumnsGeometry.forWindow(window)"),
         # Too narrow to share: columns slide over the conversation and hide it, opaque.
         (re.compile(r"max\(paneWidth, ChatChromeMetrics[.]sideConversationMinimumWidth\)"), "padPaneWidth"),
         (re.compile(r": max\(inspectorWidth, ChatChromeMetrics[.]memberListWidth\)"), ": min(max(inspectorWidth, ChatChromeMetrics.memberListWidth), bounds.width)"),
@@ -597,7 +677,30 @@ FILE_RULES = {
          "let anchor: NSView = sender.window?.contentView ?? sender\n            makeMenu().popUp(positioning: nil, at: sender.convert(NSPoint(x: 0, y: sender.bounds.maxY + 4), to: anchor), in: anchor)"),
         (re.compile(r"    override func mouseDown\(with event: NSEvent\) [{].*?\n    [}]\n\n    override func rightMouseDown\(with event: NSEvent\) [{] mouseDown\(with: event\) [}]\n", re.S), ""),
     ],
+    "SoftwareUpdatesSettingsPage.swift": [
+        (re.compile(r"(SettingsPageForm\(page: [.]softwareUpdates, state: state\) [{]\n)"),
+         lambda m: m.group(1) + """                Section {
+                    Label {
+                        VStack(alignment: .leading, spacing: InterfaceScale.metric(4)) {
+                            Text(verbatim: "Updates aren't available on iPad")
+                                .font(.interface(.headline))
+                            Text(verbatim: "The iPad version of SakuraCord can't update itself. New builds are published on GitHub and have to be sideloaded.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                    }
+                    Link(destination: URL(string: "https://github.com/woofbrush/SakuraCord-iPad/releases")!) {
+                        Text(verbatim: "Open Releases on GitHub")
+                    }
+                }
+
+"""),
+    ],
     "ComposerTextView.swift": [
+        (re.compile(r"(( *)let textView = ComposerNSTextView\(frame: [.]zero, textContainer: textContainer\)\n)"),
+         lambda m: m.group(1) + m.group(2) + "textView.textDropDelegate = PadComposerDrops.refusing\n"),
         # UIKit returns focus to the composer when a menu closes, even with a modal open over it.
         (re.compile(r"(final class ComposerNSTextView: ComposerFocusReportingTextView [{]\n)"),
          r"\g<1>    override var canBecomeFirstResponder: Bool {\n        WindowModalCoordinator.allowsInput(for: self) && super.canBecomeFirstResponder\n    }\n\n"),

@@ -6,7 +6,15 @@ import SwiftUI
 /// to a minimum size; an iPadOS window can be as narrow as a phone.
 @Observable
 final class PadLayout {
-    static let shared = PadLayout()
+    private static let layouts = NSMapTable<AppModel, PadLayout>.weakToStrongObjects()
+
+    /// Windows differ in width, and each window has its own model.
+    static func forModel(_ model: AppModel) -> PadLayout {
+        if let layout = layouts.object(forKey: model) { return layout }
+        let layout = PadLayout()
+        layouts.setObject(layout, forKey: model)
+        return layout
+    }
 
     /// Whether the search field waits as a button until it is used.
     var collapsesSearch = false
@@ -53,11 +61,11 @@ final class PadLayout {
     }
 }
 
-/// In a compact window the split view shows one column: opening a conversation goes
-/// to it, while changing servers stays on the channel list to choose from.
-struct PadCompactColumnFollower: ViewModifier {
+/// In a narrow window, opening a conversation closes the sidebar; changing servers
+/// leaves it open to choose a channel.
+struct PadConversationFollower: ViewModifier {
     let model: AppModel
-    @Binding var column: NavigationSplitViewColumn
+    let opened: () -> Void
     @State private var guildID: GuildID?
 
     func body(content: Content) -> some View {
@@ -66,7 +74,7 @@ struct PadCompactColumnFollower: ViewModifier {
             .onChange(of: model.selectedChannelID) { _, channelID in
                 let sameGuild = guildID == model.selectedGuildID
                 guildID = model.selectedGuildID
-                if sameGuild, channelID != nil { column = .detail }
+                if sameGuild, channelID != nil { opened() }
             }
     }
 }

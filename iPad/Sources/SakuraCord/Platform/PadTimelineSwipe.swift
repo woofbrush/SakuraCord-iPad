@@ -2,7 +2,8 @@ import AppKitShim
 import SakuraCordModels
 import UIKit
 
-/// Discord's message swipes, for a finger: left replies, right edits your own message.
+/// Discord's message swipes: left replies, right edits your own message. A finger, a
+/// trackpad's two-finger slide, or a click and drag that doesn't start on text.
 /// The canvas draws its rows itself, so a badge follows the swipe rather than the row.
 @MainActor
 final class PadTimelineSwipe: NSObject, UIGestureRecognizerDelegate {
@@ -17,11 +18,16 @@ final class PadTimelineSwipe: NSObject, UIGestureRecognizerDelegate {
     private let haptics = UIImpactFeedbackGenerator(style: .light)
     private var active: (action: Action, message: Message)?
     private var passedThreshold = false
+    private var isPointerDrag = false
 
     func attach(to canvas: NativeTimelineCanvasView) {
         self.canvas = canvas
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        pan.allowedTouchTypes = [
+            NSNumber(value: UITouch.TouchType.direct.rawValue),
+            NSNumber(value: UITouch.TouchType.indirectPointer.rawValue),
+        ]
+        pan.allowedScrollTypesMask = .continuous
         pan.delegate = self
         canvas.addGestureRecognizer(pan)
         badge.frame = CGRect(x: 0, y: 0, width: Self.badgeSize, height: Self.badgeSize)
@@ -37,12 +43,18 @@ final class PadTimelineSwipe: NSObject, UIGestureRecognizerDelegate {
         guard let canvas, !canvas.overlayBlocksInteractions, !canvas.sendTransitionBlocksInteractions else { return nil }
         let velocity = gesture.velocity(in: canvas)
         guard abs(velocity.x) > abs(velocity.y) * 1.4 else { return nil }
-        guard let index = canvas.rowIndex(at: gesture.location(in: canvas).y),
+        let point = gesture.location(in: canvas)
+        guard let index = canvas.rowIndex(at: point.y),
               canvas.items.indices.contains(index),
               case let .message(row, _, _) = canvas.items[index],
               MessageOutboxPresentation.interactionMode(for: row.message).allowsMessageContextMenu,
               MessageReplyPresentationPolicy.allowsReplyAction(for: row.message)
         else { return nil }
+        // Dragging across text selects it.
+        if isPointerDrag, gesture.numberOfTouches > 0 {
+            let local = CGPoint(x: point.x, y: point.y - canvas.displayedRowOrigin(at: index))
+            guard canvas.textPointerHit(in: canvas.layouts[index], point: local) == nil else { return nil }
+        }
         let message = row.message
         if velocity.x < 0 {
             return canvas.actions?.reply == nil ? nil : (.reply, message)
@@ -53,6 +65,11 @@ final class PadTimelineSwipe: NSObject, UIGestureRecognizerDelegate {
               model.guildTimeoutUntil(in: message.channelID, guildID: message.guildID) == nil
         else { return nil }
         return (.edit, message)
+    }
+
+    func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        isPointerDrag = touch.type == .indirectPointer
+        return true
     }
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
