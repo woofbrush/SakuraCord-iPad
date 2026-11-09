@@ -26,7 +26,7 @@
 
 > [!IMPORTANT]
 > This is a port of SakuraCord to iPadOS only, mobile experience might not feel as good, made to be experienced by a mouse and keyboard.
->
+>  in Addition, I would also like to mention this is a really early build!!! expect a ton of UI issues.
 > Build it with `iPad/build.sh` ([instructions](docs/DEVELOPMENT.md#ipados-app)). The rest of this page describes [upstream SakuraCord](https://github.com/SakuraCordApp/SakuraCord) for macOS.
 
 > [!WARNING]
