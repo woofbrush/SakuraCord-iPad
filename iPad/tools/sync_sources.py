@@ -203,6 +203,8 @@ FILE_RULES = {
         (re.compile(r"(profileEditor: profileEditor\n            \))(\n        [}]\n        [.]searchable)"),
          lambda m: m.group(1) + "\n            .containerBackground(.clear, for: .navigation)" + m.group(2)),
         (re.compile(r"minWidth: InterfaceScale[.]windowLength\(1060, axis: [.]horizontal\)"), "minWidth: 0"),
+        # macOS sizes its window to this; a sheet has its own width, and the rest was left empty.
+        (re.compile(r"maxWidth: InterfaceScale[.]windowLength\(1060, axis: [.]horizontal\)"), "maxWidth: .infinity"),
     ],
     # A compact window shows one column at a time; the overflow button can hold everything.
     "WorkspaceToolbarItems.swift": [
