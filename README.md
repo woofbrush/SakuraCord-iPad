@@ -16,7 +16,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/SakuraCordApp/SakuraCord/releases/latest">Download DMG</a>
+    <a href="https://github.com/woofbrush/SakuraCord-iPad/releases/">Download .ipa</a>
     ·
     <a href="#build-from-source">Build from source</a>
     ·
@@ -33,7 +33,7 @@
 > This is my first ever iOS/iPadOS related project, I don't even own a mac therefore I had to build/compile this with xtool, support would be appreciated.
 ---
 
-## A Discord client that belongs on macOS
+## A Discord client that belongs on iPadOS
 
 SakuraCord preserves the visual language and familiar rhythm of Discord, then
 reimagines the experience through Liquid Glass and native macOS design instead
@@ -46,7 +46,7 @@ Mac app.
   <tr>
     <td width="50%" valign="top">
       <h3>🌸 Native by design</h3>
-      SwiftUI surfaces, real macOS windows, menus, shortcuts, settings, and
+      SwiftUI surfaces, real iPadOS windows, menus, shortcuts, settings, and
       Liquid Glass presentation.
     </td>
     <td width="50%" valign="top">
@@ -71,19 +71,8 @@ Mac app.
 
 ## Download
 
-Download the [latest SakuraCord DMG](https://github.com/SakuraCordApp/SakuraCord/releases/latest)
-for macOS 27 or newer, open it, and move SakuraCord into Applications.
-
-On Apple Silicon, install with [Homebrew](https://brew.sh):
-
-```sh
-brew install --cask SakuraCordApp/tap/sakuracord
-```
-
-Run `brew update` followed by `brew upgrade --cask sakuracord` to update.
-
-Current releases are ad-hoc signed rather than notarized, so macOS may require
-approval from **System Settings → Privacy & Security** on first launch.
+Download the [latest SakuraCord .ipa](https://github.com/woofbrush/SakuraCord-iPad/releases/)
+for iPadOS 27 or newer, open it, and move SakuraCord into Applications.
 
 SakuraCord is an independent project and is not affiliated with Discord.
 Discord does not provide a supported third-party platform for normal-account
