@@ -392,6 +392,8 @@ FILE_RULES = {
         (re.compile(r"\n *var code: SecStaticCode[?].*?signatureVerificationFailed\(validationStatus\)\n\s*[}]", re.S), ""),
     ],
     "WindowModalCoordinator.swift": [
+        # A hosting view can't take focus here, which would leave it with the composer.
+        (re.compile(r"^( *)window[.]makeFirstResponder\(host\)$", re.M), r"\g<1>window.firstResponder?.resignFirstResponder()\n\g<1>window.makeFirstResponder(host)"),
         (re.compile(r"\(responder as[?] NSText\)[.]flatMap [{][^\n]*?[}] [?][?] "), ""),
     ],
     # These views are placed by frame; UIKit would otherwise leave them to Auto Layout.
@@ -437,7 +439,33 @@ FILE_RULES = {
     "AppModelScreenSharing.swift": [
         (re.compile(r"let isEnabled = mainWindowIsActive && intent[.]isEnabled"), "let isEnabled = intent.isEnabled"),
     ],
+    # The symbol supplies only its shape; a translucent palette color doesn't reach it reliably.
+    "NativeTimelineRowPainterComponents.swift": [
+        (re.compile(r"paletteColors:\s*\[resolvedColor\]"), "paletteColors: [resolvedColor.withAlphaComponent(1)]"),
+        (re.compile(r"(from image: NSImage,\s*scale: CGFloat,\s*appearance: NSAppearance)(\s*\) -> NSImage[?])"), r"\g<1>,\n        resolvedColor: NSColor\g<2>"),
+        (re.compile(r"(from: configuredImage,\s*scale: CGFloat\(scaleQuarter\) / 4,\s*appearance: appearance)(\s*\))"), r"\g<1>,\n            resolvedColor: resolvedColor\g<2>"),
+        (re.compile(r"(hints: \[[.]interpolation: NSImageInterpolation[.]high\]\s*\)\n)( *)graphics[.]flushGraphics\(\)"), r"\g<1>\g<2>resolvedColor.setFill()\n\g<2>UIRectFillUsingBlendMode(CGRect(origin: .zero, size: size), .sourceIn)\n\g<2>graphics.flushGraphics()"),
+        (re.compile(r"systemSymbol\(\s*SakuraCordSystemSymbol[.]emojiFaceGrinning,\s*in: NativeTimelineReactionAddControlGeometry[.]iconFrame\(in: frame\),\s*color: NSColor[.]labelColor[.]withAlphaComponent\(0[.]8\),\s*inset: 0,\s*weight: [.]medium\s*\)"),
+         "PadCenteredSymbol.draw(SakuraCordSystemSymbol.emojiFaceGrinning, in: frame, visibleHeight: InterfaceScale.metric(15), color: NSColor.labelColor.withAlphaComponent(0.8))"),
+    ],
+    # iPadOS has no browser to look up; opening a web URL already goes to the default one.
+    "MediaViewerActions.swift": [
+        (re.compile(r"static func openInBrowser\(_ url: URL\) [{].*?\n    [}]\n", re.S),
+         "static func openInBrowser(_ url: URL) {\n        NSWorkspace.shared.open(url)\n    }\n"),
+    ],
+    # A UIControl keeps its touches, so the press arrives as a control event, and the
+    # point below the button is a positive y in UIKit's top-left coordinates.
+    "MediaViewerMoreMenuButton.swift": [
+        (re.compile(r"( *)button[.]action = #selector\(Coordinator[.]showMenu\(_:\)\)"),
+         r"\g<0>\n\g<1>button.addTarget(context.coordinator, action: #selector(Coordinator.showMenu(_:)), for: .touchUpInside)"),
+        (re.compile(r"makeMenu\(\)[.]popUp\(\s*positioning: nil,\s*at: NSPoint\(x: 0, y: -4\),\s*in: sender\s*\)"),
+         "let anchor: NSView = sender.window?.contentView ?? sender\n            makeMenu().popUp(positioning: nil, at: sender.convert(NSPoint(x: 0, y: sender.bounds.maxY + 4), to: anchor), in: anchor)"),
+        (re.compile(r"    override func mouseDown\(with event: NSEvent\) [{].*?\n    [}]\n\n    override func rightMouseDown\(with event: NSEvent\) [{] mouseDown\(with: event\) [}]\n", re.S), ""),
+    ],
     "ComposerTextView.swift": [
+        # UIKit returns focus to the composer when a menu closes, even with a modal open over it.
+        (re.compile(r"(final class ComposerNSTextView: ComposerFocusReportingTextView [{]\n)"),
+         r"\g<1>    override var canBecomeFirstResponder: Bool {\n        WindowModalCoordinator.allowsInput(for: self) && super.canBecomeFirstResponder\n    }\n\n"),
         (re.compile(r"layoutManager[.]usedRect\(for: textContainer\)[.]maxY"), "textView.ak_fittingTextHeight(width: proposedWidth)"),
         (re.compile(r"guard let textView = responder as[?] NSTextView else [{] return false [}]"),
          "guard let textView = responder as? NSTextView else { return responder is UITextField }"),

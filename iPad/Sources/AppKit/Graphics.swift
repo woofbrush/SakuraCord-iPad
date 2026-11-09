@@ -272,6 +272,7 @@ public nonisolated final class NSGraphicsContext: NSObject {
 
     public convenience init?(bitmapImageRep representation: NSBitmapImageRep) {
         guard let context = representation.context else { return nil }
+        representation.ak_scaleContextToSize()
         self.init(cgContext: context, flipped: false)
     }
 
@@ -636,6 +637,15 @@ public nonisolated final class NSBitmapImageRep: NSObject {
         )
         super.init()
         if context == nil { return nil }
+    }
+
+    private var isContextScaled = false
+
+    /// AppKit draws into a representation in its `size`, mapped onto its pixels.
+    func ak_scaleContextToSize() {
+        guard let context, !isContextScaled, size.width > 0, size.height > 0 else { return }
+        isContextScaled = true
+        context.scaleBy(x: CGFloat(context.width) / size.width, y: CGFloat(context.height) / size.height)
     }
 
     private func pixel(x: Int, y: Int) -> UnsafeMutablePointer<UInt8>? {
