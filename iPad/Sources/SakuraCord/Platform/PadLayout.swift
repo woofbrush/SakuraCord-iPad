@@ -21,6 +21,13 @@ final class PadLayout {
         width < ChatChromeMetrics.memberListWidth + InterfaceScale.metric(360)
     }
 
+    /// Behind a column covering the conversation, in the theme's own surface.
+    static func coverColor(isDark: Bool) -> UIColor {
+        let base = UIColor.secondarySystemBackground
+            .resolvedColor(with: UITraitCollection(userInterfaceStyle: isDark ? .dark : .light))
+        return SakuraCordThemeStore.shared.committedTheme.discordTinted(base, isDark: isDark)
+    }
+
     /// Closes the member list as the window becomes too narrow and brings it back as
     /// the window widens. Opening it while narrow stays the reader's choice.
     func detailWidthChanged(_ width: CGFloat, model: AppModel) {

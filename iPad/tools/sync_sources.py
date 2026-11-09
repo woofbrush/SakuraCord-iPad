@@ -177,7 +177,31 @@ FILE_RULES = {
     ],
     # iPadOS draws its sidebar toggle where macOS draws the server name; keep the
     # toggle at the sidebar's trailing edge, which is where macOS places it.
+    # macOS sets this through a private NSApplication accent.
+    "AppAccentColorController.swift": [
+        (re.compile(r"    func start\(\) [{].*?\n    [}]\n.*?    func apply\(\) [{].*?\n    [}]\n", re.S),
+         """    func start() {
+        hasStarted = true
+        apply()
+    }
+
+    /// The tint every view inherits, on each theme commit.
+    func apply() {
+        guard hasStarted else { return }
+        let accent = SakuraCordThemeStore.shared.accentNSColor()
+        NSColor.ak_accentColor = accent
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows { window.tintColor = accent }
+        }
+    }
+"""),
+    ],
     "SettingsView.swift": [
+        # A column's background belongs to its content here; set outside the split view it does nothing.
+        (re.compile(r"[.]navigationSplitViewColumnWidth\(min: 190, ideal: 220, max: 280\)"),
+         lambda m: ".containerBackground(.clear, for: .navigation)\n            " + m.group(0)),
+        (re.compile(r"(profileEditor: profileEditor\n            \))(\n        [}]\n        [.]searchable)"),
+         lambda m: m.group(1) + "\n            .containerBackground(.clear, for: .navigation)" + m.group(2)),
         (re.compile(r"minWidth: InterfaceScale[.]windowLength\(1060, axis: [.]horizontal\)"), "minWidth: 0"),
     ],
     # A compact window shows one column at a time; the overflow button can hold everything.
@@ -218,6 +242,10 @@ FILE_RULES = {
 """ + m.group(1)),
     ],
     "RootView.swift": [
+        # Opaque columns would hide the theme's gradient, leaving only its tinted surfaces.
+        (re.compile(r"[.]interfaceScaleRoot\(\)(\n *[.]opacity\(model[.]isSwitchingAccounts [?] 0 : 1\))"),
+         lambda m: ".interfaceScaleRoot()\n            .containerBackground(.clear, for: .navigation)" + m.group(1)),
+        (re.compile(r'[.]navigationTitle\(""\)'), lambda m: '.containerBackground(.clear, for: .navigation)\n            ' + m.group(0)),
         (re.compile(r"(    @State private var columnVisibility: NavigationSplitViewVisibility = [.]all\n)"),
          lambda m: m.group(1) + "    @Environment(\\.horizontalSizeClass) private var padSizeClass\n    @State private var padCompactColumn = NavigationSplitViewColumn.detail\n"),
         (re.compile(r"NavigationSplitView\(columnVisibility: [$]columnVisibility\) [{]"),
@@ -487,7 +515,7 @@ FILE_RULES = {
         (re.compile(r"covered = paneWidth\n"), "covered = padIsNarrow ? 0 : paneWidth\n"),
         (re.compile(r"island[.]column[.]isDeparting [?] covered : shown"), "island.column.isDeparting && !padIsNarrow ? covered : shown"),
         (re.compile(r"(( *)let shown = width [*] island[.]reveal[.]value\(at: time\)\n)"),
-         lambda m: m.group(1) + m.group(2) + "island.view.backgroundColor = padIsNarrow ? .secondarySystemBackground : nil\n"),
+         lambda m: m.group(1) + m.group(2) + "island.view.backgroundColor = padIsNarrow ? PadLayout.coverColor(isDark: traitCollection.userInterfaceStyle == .dark) : nil\n"),
         (re.compile(r"return AnyView\(content[.]environment\(\\[.]self, environment\)\)"), r"return AnyView(PadToolbarSafeArea(content: content.environment(\\.self, environment)))"),
         # UIHostingController's view is opaque by default; NSHostingController's is transparent.
         (re.compile(r"^( *)host[.]sizingOptions = \[\]$", re.M), lambda m: f"{m.group(0)}\n{m.group(1)}host.view.backgroundColor = .clear"),

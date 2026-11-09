@@ -20,8 +20,10 @@ public nonisolated extension UIColor {
     static var selectedTextBackgroundColor: UIColor { .tintColor.withAlphaComponent(0.3) }
     static var unemphasizedSelectedTextBackgroundColor: UIColor { .systemFill }
     static var unemphasizedSelectedContentBackgroundColor: UIColor { .systemFill }
-    static var controlAccentColor: UIColor { .tintColor }
-    static var keyboardFocusIndicatorColor: UIColor { .tintColor }
+    /// What the app sets as its accent; drawing outside a view has no tint to inherit.
+    nonisolated(unsafe) static var ak_accentColor: UIColor?
+    static var controlAccentColor: UIColor { ak_accentColor ?? .tintColor }
+    static var keyboardFocusIndicatorColor: UIColor { ak_accentColor ?? .tintColor }
 
     convenience init(srgbRed red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) {
         self.init(red: red, green: green, blue: blue, alpha: alpha)

@@ -72,6 +72,7 @@ struct SakuraCordApp: App {
                     isShowingSettings = true
                 }
                 .task {
+                    AppAccentColorController.shared.start()
                     appDelegate.model = model
                     await appDelegate.startSession(for: model)
                     await model.applyConfiguredLocalStorageLimit()
